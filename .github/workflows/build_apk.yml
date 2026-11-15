@@ -1,0 +1,58 @@
+name: build_apk
+
+# Builds the offline calibrator APK (JORO + Stockfish inside) and the JORO arm64 engine file you can
+# import into the app to test an update.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "android/**"
+      - "experience/**"
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Android NDK + CMake
+        run: |
+          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
+
+      - name: Build engines (JORO + Stockfish) for arm64
+        run: bash android/tools/build_engines_android.sh
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build APK
+        run: gradle -p android assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: joro-calibrator-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+
+      # the file to use with "Import moteur" inside the app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: joro-engine-arm64
+          path: android/app/src/main/jniLibs/arm64-v8a/libjoro.so
+
+      - uses: actions/upload-artifact@v4
+        if: hashFiles('experience/joro.exp') != ''
+        with:
+          name: joro-experience
+          path: experience/joro.exp
