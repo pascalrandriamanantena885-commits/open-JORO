@@ -2,6 +2,7 @@ name: build_apk
 
 # Builds the offline calibrator APK (JORO + Stockfish inside) and the JORO arm64 engine file you can
 # import into the app to test an update.
+# If a joro-repo*.tgz archive sits in the repo root, it is extracted automatically before the build.
 on:
   workflow_dispatch:
   push:
@@ -10,6 +11,7 @@ on:
       - "src/**"
       - "android/**"
       - "experience/**"
+      - "*.tgz"
 
 jobs:
   apk:
@@ -17,6 +19,21 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      # extracts the project archive from the repo root (if any); otherwise uses the files as committed
+      - name: Extract project archive
+        run: |
+          shopt -s nullglob
+          ARCH=(joro-repo*.tgz)
+          if [ ${#ARCH[@]} -eq 0 ]; then
+            echo "No .tgz archive in repo root, using files as committed."
+            exit 0
+          fi
+          A="${ARCH[-1]}"
+          echo "Extracting $A"
+          tar tzf "$A" | head -20
+          tar xzf "$A"
+          ls
 
       - uses: actions/setup-java@v4
         with:
@@ -31,12 +48,12 @@ jobs:
           "$SDKM" "ndk;26.1.10909125" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
 
-      # finds the project even if it sits in a sub-folder of the repo; explains clearly if android/ was not committed
+      # finds the project even if it sits in a sub-folder of the repo; explains clearly if android/ is missing
       - name: Locate project
         run: |
           S=$(find . -name build_engines_android.sh -not -path "./.git/*" | head -1)
           if [ -z "$S" ]; then
-            echo "::error::build_engines_android.sh not found in the repo: the android/ folder was not committed. Files in the repo:"
+            echo "::error::build_engines_android.sh not found: no android/ folder in the repo or in the .tgz archive. Files in the repo:"
             git ls-files | head -100
             exit 1
           fi
