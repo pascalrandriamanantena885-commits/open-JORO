@@ -23,12 +23,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
+      # The Android SDK is already installed on ubuntu-latest (ANDROID_HOME). We only add NDK + CMake.
       - name: Android NDK + CMake
         run: |
-          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "ndk;26.1.10909125" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
 
       - name: Build engines (JORO + Stockfish) for arm64
         run: bash android/tools/build_engines_android.sh
