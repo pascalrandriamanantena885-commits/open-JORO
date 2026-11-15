@@ -31,29 +31,42 @@ jobs:
           "$SDKM" "ndk;26.1.10909125" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
 
+      # finds the project even if it sits in a sub-folder of the repo; explains clearly if android/ was not committed
+      - name: Locate project
+        run: |
+          S=$(find . -name build_engines_android.sh -not -path "./.git/*" | head -1)
+          if [ -z "$S" ]; then
+            echo "::error::build_engines_android.sh not found in the repo: the android/ folder was not committed. Files in the repo:"
+            git ls-files | head -100
+            exit 1
+          fi
+          ROOT=$(cd "$(dirname "$S")/../.." && pwd)
+          echo "Project root: $ROOT"
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+
       - name: Build engines (JORO + Stockfish) for arm64
-        run: bash android/tools/build_engines_android.sh
+        run: bash "$ROOT/android/tools/build_engines_android.sh"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
 
       - name: Build APK
-        run: gradle -p android assembleDebug --no-daemon
+        run: gradle -p "$ROOT/android" assembleDebug --no-daemon
 
       - uses: actions/upload-artifact@v4
         with:
           name: joro-calibrator-apk
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.ROOT }}/android/app/build/outputs/apk/debug/*.apk
 
       # the file to use with "Import moteur" inside the app
       - uses: actions/upload-artifact@v4
         with:
           name: joro-engine-arm64
-          path: android/app/src/main/jniLibs/arm64-v8a/libjoro.so
+          path: ${{ env.ROOT }}/android/app/src/main/jniLibs/arm64-v8a/libjoro.so
 
       - uses: actions/upload-artifact@v4
-        if: hashFiles('experience/joro.exp') != ''
+        if: hashFiles('**/experience/joro.exp') != ''
         with:
           name: joro-experience
-          path: experience/joro.exp
+          path: ${{ env.ROOT }}/experience/joro.exp
