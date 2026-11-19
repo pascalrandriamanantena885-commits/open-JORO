@@ -35,6 +35,16 @@ jobs:
           tar xzf "$A"
           ls
 
+      # Fix Kotlin error "Argument type mismatch: String? vs Any" (Storage.kt, createUpdate).
+      # Idempotent: does nothing if the file is already fixed.
+      - name: Patch Storage.kt (engineRequired nullable)
+        run: |
+          F=$(find . -name Storage.kt -path "*com/joro/calibrator*" -not -path "./.git/*" | head -1)
+          if [ -n "$F" ]; then
+            sed -i 's|error(engineRequired())|error(engineRequired() ?: "Mbola tsy misy moteur JORO.")|' "$F"
+            grep -n "val engine = joroFile()" "$F" || true
+          fi
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
