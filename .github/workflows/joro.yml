@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        seed: [1000, 2000, 3000, 4000]
+        seed: [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000]
     steps:
       - uses: actions/checkout@v4
 
