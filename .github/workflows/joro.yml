@@ -1,0 +1,53 @@
+name: JORO
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "analyze, selfplay, match"
+        default: "match"
+      fen:
+        description: "FEN (na startpos)"
+        default: "startpos"
+      extra:
+        description: "oh: --cpp ./joro_cpp --games 30 --sf-elo 1900 --time 1 --openplies 1"
+        default: ""
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1000, 2000, 3000, 4000]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install chess numpy
+
+      - uses: actions/cache@v4
+        id: kbnk
+        with:
+          path: kbnk.dat
+          key: kbnk-v1
+      - if: steps.kbnk.outputs.cache-hit != 'true'
+        run: python joro.py buildkbn
+
+      - name: Compile C++ engine
+        run: g++ -O3 -std=c++17 -o joro_cpp joro.cpp
+
+      - run: sudo apt-get update && sudo apt-get install -y stockfish
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "pypy3.10"
+      - run: pip install chess
+
+      - name: Run JORO
+        run: python joro.py $MODE "$FEN" $EXTRA --seed $SEED
+        env:
+          MODE: ${{ inputs.mode }}
+          FEN: ${{ inputs.fen }}
+          EXTRA: ${{ inputs.extra }}
+          SEED: ${{ matrix.seed }}
