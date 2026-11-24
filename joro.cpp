@@ -594,7 +594,7 @@ static int castleStructTerms(const Position &p) {
 // castleCommit : -1 = tsy mbola voafidy ; 0 = short ; 1 = long (efa nanao castle, na efa vonona ho amin'ny elatra iray)
 static bool STORM_ON = true;
 static int STORM_CAP = 80;
-static int SAMESIDE_PEN = 12;
+static int SAMESIDE_PEN = 35;
 static int ROOT_US = -1;                 // ny lafy mijery amin'ny root (JORO) : ny safidy castling dia ho an'i JORO ihany
 static int castleCommit(const Position &p, int c) {
     if (isCastled(p, c)) return fileOf(kingSq(p, c)) >= 5 ? 0 : 1;
@@ -611,44 +611,25 @@ static int castleVsOpp(const Position &p, int c) {
     int mine = castleCommit(p, c), th = castleCommit(p, c ^ 1);
     if (mine < 0 || th < 0) return 0;
     double w = 0.5 + 0.25 * isCastled(p, c) + 0.25 * isCastled(p, c ^ 1);
-    return mine == th ? -(int)(SAMESIDE_PEN * w) : (int)(5 * w);
+    return mine == th ? -(int)(SAMESIDE_PEN * w) : (int)(10 * w);
 }
 // Pawn Storm / fanamelohana ny shield aorian'ny castle : pawn manafika ny elatra, lever, colonne misokatra, piece rehetra manindry.
 static int stormSide(const Position &p, int c) {
-    int o = c ^ 1, so = castleCommit(p, o), eks = kingSq(p, o), v = 0;
-    // (A) CONVERGE : ny piece rehetra mifotra makany amin'ny king mpanohitra, na aiza na aiza misy azy (castle na tsia)
-    static const int CW[5] = {0, 2, 2, 2, 3};
-    int conv = 0;
-    for (int pt = KNIGHT; pt <= QUEEN; pt++) {
-        U64 pcs = p.bb[mk(c, pt)];
-        while (pcs) { int s = poplsb(pcs); conv += CW[pt] * max(0, 6 - distCheb(s, eks)); }
-    }
-    v += min(conv, 40);
-    if (so < 0) return v;
-    bool same = castleCommit(p, c) == so;                         // samy elatra iray ny king roa
+    int o = c ^ 1, so = castleCommit(p, o);
+    if (so < 0) return 0;
+    double factor = castleCommit(p, c) == so ? 0.4 : 1.0;          // castle mitovy elatra -> storm malemy kokoa (loza ho an'ny king-ko)
     int f0 = so == 0 ? 5 : 0;
     U64 wingFiles = FILE_BB[f0] | FILE_BB[f0 + 1] | FILE_BB[f0 + 2];
     U64 ownp = p.bb[mk(c, PAWN)], oppp = p.bb[mk(o, PAWN)], shield = oppp & wingFiles;
-    if (!same) {
-        // (B) Pawn Storm (castle mifanohitra) : pawn nandroso + lever manohitra ny shield
-        U64 b = ownp & wingFiles;
-        while (b) {
-            int s = poplsb(b), r = c == WHITE ? rankOf(s) : 7 - rankOf(s);
-            if (r >= 3) v += min(15, 5 * (r - 2));
-            if (PAWN_ATT[c][s] & shield) v += 6;
-        }
-    } else if (isCastled(p, c)) {
-        // (B') Castle mitovy elatra : ny pawn 3 an'ny shield-ko dia mijanona (king safe), ny piece hafa no manafika
-        int myf0 = so == 0 ? 5 : 0, cnt = 0;
-        for (int f = myf0; f < myf0 + 3; f++) {
-            U64 fp = ownp & FILE_BB[f];
-            while (fp) { int s = poplsb(fp), r = c == WHITE ? rankOf(s) : 7 - rankOf(s); if (r <= 2) { cnt++; break; } }
-        }
-        v += 6 * cnt;
+    int v = 0;
+    U64 b = ownp & wingFiles;
+    while (b) {
+        int s = poplsb(b), r = c == WHITE ? rankOf(s) : 7 - rankOf(s);
+        if (r >= 3) v += min(15, 5 * (r - 2));                        // pawn nandroso
+        if (PAWN_ATT[c][s] & shield) v += 6;                          // lever manohitra ny shield
     }
-    // (C) Colonne mankany amin'ny king (rook/queen) sy pressure an'ny piece rehetra amin'ny elatra : ho an'ny tranga rehetra
-    int kf = fileOf(eks);
-    for (int f = max(0, kf - 1); f <= min(7, kf + 1); f++) {
+    int eks = kingSq(p, o), kf = fileOf(eks);
+    for (int f = max(0, kf - 1); f <= min(7, kf + 1); f++) {          // colonne mankany amin'ny king
         U64 fm = FILE_BB[f];
         if (fm & ownp) continue;
         if (fm & (p.bb[mk(c, ROOK)] | p.bb[mk(c, QUEEN)])) v += (fm & oppp) ? 8 : 14;
@@ -661,8 +642,8 @@ static int stormSide(const Position &p, int c) {
         U64 pcs = p.bb[mk(c, pt)];
         while (pcs) { int s = poplsb(pcs); press += ATTW[pt] * popcnt(attacksFrom(pt, s, p.all, c) & zone); }
     }
-    v += min(24, 2 * press);
-    return min(v, 90);
+    v += min(24, 2 * press);                                          // piece rehetra manindry
+    return (int)(min(v, 70) * factor);
 }
 static int stormTerms(const Position &p) {
     int d = stormSide(p, WHITE) - stormSide(p, BLACK);
@@ -1615,7 +1596,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 1.2\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 12 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 1.1\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
