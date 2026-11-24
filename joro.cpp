@@ -575,7 +575,7 @@ static int passiveDev(const Position &p, int c) {
     }
     return min(pen, 40);
 }
-static int castleStructSide(const Position &p, int c, int danger = 99) {
+static int castleStructSide(const Position &p, int c) {
     int pc = predictCastle(p, c);
     if (pc != CP_SHORT && pc != CP_LONG) return 0;
     bool castled = isCastled(p, c);
@@ -583,12 +583,10 @@ static int castleStructSide(const Position &p, int c, int danger = 99) {
     int v = (q - 4) * (castled ? 5 : 3);
     if (q >= 6) v += castled ? 10 : 5;       // Right Castle
     if (q <= 1) v -= castled ? 15 : 8;       // Wrong Castle
-    // Pawn shield tsy antoka foana : raha tsy misy mamely ny king (danger ambany) dia malemy ny lanjany, ka afaka mandroso ny pawn
-    double sw = 0.3 + 0.7 * min(1.0, max(0.0, (danger - 4) / 8.0));
-    return (int)(v * sw);
+    return v;
 }
-static int castleStructTerms(const Position &p, int aw, int ab) {
-    int d = castleStructSide(p, WHITE, ab) - castleStructSide(p, BLACK, aw);      // danger ho an'ny king = attackPower an'ny mpanohitra
+static int castleStructTerms(const Position &p) {
+    int d = castleStructSide(p, WHITE) - castleStructSide(p, BLACK);
     return max(-OPEN2_CAP, min(OPEN2_CAP, d));
 }
 
@@ -627,16 +625,26 @@ static int stormSide(const Position &p, int c) {
     }
     v += min(conv, 40);
     if (so < 0) return v;
+    bool same = castleCommit(p, c) == so;                         // samy elatra iray ny king roa
     int f0 = so == 0 ? 5 : 0;
     U64 wingFiles = FILE_BB[f0] | FILE_BB[f0 + 1] | FILE_BB[f0 + 2];
     U64 ownp = p.bb[mk(c, PAWN)], oppp = p.bb[mk(o, PAWN)], shield = oppp & wingFiles;
-    // (B) Pawn Storm : ny pawn amin'ny elatra dia manafika foana (na castle mifanohitra, na mitovy elatra) ;
-    //     tsy ny pawn shield no antoka ho an'ny king : ny toerana safe no jerena (castleStructSide, araka ny loza)
-    U64 b = ownp & wingFiles;
-    while (b) {
-        int s = poplsb(b), r = c == WHITE ? rankOf(s) : 7 - rankOf(s);
-        if (r >= 3) v += min(15, 5 * (r - 2));
-        if (PAWN_ATT[c][s] & shield) v += 6;
+    if (!same) {
+        // (B) Pawn Storm (castle mifanohitra) : pawn nandroso + lever manohitra ny shield
+        U64 b = ownp & wingFiles;
+        while (b) {
+            int s = poplsb(b), r = c == WHITE ? rankOf(s) : 7 - rankOf(s);
+            if (r >= 3) v += min(15, 5 * (r - 2));
+            if (PAWN_ATT[c][s] & shield) v += 6;
+        }
+    } else if (isCastled(p, c)) {
+        // (B') Castle mitovy elatra : ny pawn 3 an'ny shield-ko dia mijanona (king safe), ny piece hafa no manafika
+        int myf0 = so == 0 ? 5 : 0, cnt = 0;
+        for (int f = myf0; f < myf0 + 3; f++) {
+            U64 fp = ownp & FILE_BB[f];
+            while (fp) { int s = poplsb(fp), r = c == WHITE ? rankOf(s) : 7 - rankOf(s); if (r <= 2) { cnt++; break; } }
+        }
+        v += 6 * cnt;
     }
     // (C) Colonne mankany amin'ny king (rook/queen) sy pressure an'ny piece rehetra amin'ny elatra : ho an'ny tranga rehetra
     int kf = fileOf(eks);
@@ -968,7 +976,7 @@ static int evaluate(const Position &p) {
     score += (aw - ab) / 2;
     if (eg) score += endgameTerms(p, npmW, npmB);
     if (OPENING_ON && isOpeningPos(p, npmW, npmB)) score += openingTerms(p);
-    if (OPEN2_ON && npmW + npmB >= OPEN2_NPM) score += castleStructTerms(p, aw, ab);
+    if (OPEN2_ON && npmW + npmB >= OPEN2_NPM) score += castleStructTerms(p);
     if (OPEN2_ON && ROOT_US >= 0 && npmW + npmB >= OPEN2_NPM) { int d = castleVsOpp(p, ROOT_US); score += ROOT_US == WHITE ? d : -d; }
     if (STORM_ON && !eg) score += stormTerms(p);
     Eta E[2]; bool haveE = false;
@@ -1607,7 +1615,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 1.3\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 12 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 1.2\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 12 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
