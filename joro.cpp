@@ -701,7 +701,7 @@ static int openingTerms(const Position &p) {
 // coverage ghost vs real (cost = efa mila sacrifice/open line), pattern checkmate (distance), tempo,
 // ary decide (IGNORE/ALLOW/CARE) mba hanapahana ny lanjan'ny attack mpanohitra.
 // =====================================================================================
-static bool GHOST_ON = false;
+static bool GHOST_ON = true;
 static int GHOST_W = 25;        // % (lanja)
 static int GHOST_CAP = 80;      // cp
 static int GHOST_ALERT = 10;    // attack_power farany ambany hampiasana ghost
@@ -931,7 +931,7 @@ static int historyT[2][64][64];
 static Move rootBest = 0;
 static vector<Move> rootBan;                        // move ho sivanina amin'ny root (Opening Guard)
 static bool CLEAN_ON = true;                       // Clean Move : tsy ahena ny move mankany amin'ny attack, ahena ny retreat/passive
-static bool GUIDE_LMR = false, GUIDE_EXT = false;   // ghost ho mpitarika ny search (tsy ny eval)
+static bool GUIDE_LMR = true, GUIDE_EXT = true;   // ghost ho mpitarika ny search (tsy ny eval)
 static int GUIDE_ALERT = 12;
 
 static double elapsedMs() { return chrono::duration<double, milli>(chrono::steady_clock::now() - tStart).count(); }
@@ -1461,7 +1461,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 0.8\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default false\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default false\noption name GuideExt type check default false\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 0.9\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
