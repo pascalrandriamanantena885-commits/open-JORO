@@ -487,7 +487,7 @@ static int endgameTerms(const Position &p, int npmW, int npmB) {
 // OPENING (tanjona JORO) - port avy amin'ny joro.py v1.4.1 : fivoarana tsy mampiaraka, afovoany,
 // castling ho an'ny king-ko, ary FANAKANANA ny castling an'ny mpanohitra (ghost).
 // =====================================================================================
-static bool OPENING_ON = false;
+static bool OPENING_ON = true;
 static int OPEN_CAP = 100;
 static const int OPEN_NPM = 4800;
 static U64 BACKRANK[2];
@@ -506,7 +506,7 @@ static bool isOpeningPos(const Position &p, int npmW, int npmB) {
     return npmW + npmB >= OPEN_NPM && undeveloped(p, WHITE) + undeveloped(p, BLACK) >= 2;
 }
 // ---- OPENING 2 : anticipation castling, Right/Wrong Castle, Passive Development
-static bool OPEN2_ON = false;
+static bool OPEN2_ON = true;
 static int OPEN2_CAP = 60;
 static const int OPEN2_NPM = 3600;                 // manana ihany hatramin'ny fiafaran'ny opening/middlegame aloha
 enum { CP_NONE = 0, CP_SHORT, CP_LONG, CP_CENTER };
@@ -767,7 +767,7 @@ static Threat ghostThreat(const Position &p, int c) {
 //   Pawn Shield (vidin'ny fanokafana), Escape squares, + 1 (move farany).
 //   Aorian'izay : comparaison ETA roa  ->  CARE / LET IT GO (raceCare) ary bonus ho an'ny mpiady haingana (raceTerm).
 // =====================================================================================
-static bool RACE_ON = false;
+static bool RACE_ON = true;
 static int RACE_W = 5;            // cp isaky ny move eo amin'ny elanelana ETA
 static int RACE_CAP = 90;         // cp
 static int RACE_ALERT = 8;        // attack_power farany ambany
@@ -929,7 +929,8 @@ static double timeLimitMs = 0;
 static Move killers[MAXPLY + 4][2];
 static int historyT[2][64][64];
 static Move rootBest = 0;
-static bool CLEAN_ON = false;                       // Clean Move : tsy ahena ny move mankany amin'ny attack, ahena ny retreat/passive
+static vector<Move> rootBan;                        // move ho sivanina amin'ny root (Opening Guard)
+static bool CLEAN_ON = true;                       // Clean Move : tsy ahena ny move mankany amin'ny attack, ahena ny retreat/passive
 static bool GUIDE_LMR = false, GUIDE_EXT = false;   // ghost ho mpitarika ny search (tsy ny eval)
 static int GUIDE_ALERT = 12;
 
@@ -1060,6 +1061,7 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
     for (int i = 0; i < l.n; i++) {
         pickMove(l, i);
         Move m = l.m[i];
+        if (root && !rootBan.empty() && find(rootBan.begin(), rootBan.end(), m) != rootBan.end()) continue;
         bool quiet = !(m & (F_CAP | F_EP)) && !mPromo(m);
         bool aggr = false, sacr = false, retreat = false;
         if (atkCtx) {
@@ -1155,6 +1157,34 @@ static Move findMoveStr(Position &p, const string &s) {
     return 0;
 }
 
+// =====================================================================================
+// OPENING GUARD - sivana amin'ny root (tsy misy vidiny ao anaty search). Mandrara ireo move quiet ao amin'ny opening izay:
+//  (1) Passive Development : bishop mankany d3/e3 (d6/e6) eo anoloan'ny pawn d/e tsy mbola nihetsika
+//  (2) Clean Move : move faharoa an'ny bishop/knight mankany amin'ny toerana azo tratrarina tamin'ny move 1 (na miverina
+//      any amin'ny toerana nialany), raha tsy voatafika ilay piece, tsy capture, tsy check.
+// =====================================================================================
+static bool OPEN_GUARD = true;
+static bool guardBlocks(const Position &p, Move m) {
+    if (m & (F_CAP | F_EP | F_CASTLE)) return false;
+    if (mPromo(m)) return false;
+    int c = p.stm, from = mFrom(m), to = mTo(m), pt = ptOf(p.sq[from]);
+    if (pt != BISHOP && pt != KNIGHT) return false;
+    if (pt == BISHOP)
+        for (int f = 3; f <= 4; f++)
+            if (to == relSq(c, f, 2) && (p.bb[mk(c, PAWN)] & BIT(relSq(c, f, 1)))) return true;
+    if (isAttacked(p, from, c ^ 1)) return false;
+    for (int i = p.hply - 1; i >= 0; i--) {
+        Move pm = p.hist[i].move;
+        if (!pm || mTo(pm) != from) continue;
+        if (p.hist[i].cap != NOPIECE) return false;
+        int a = mFrom(pm);
+        if (to == a) return true;
+        if (pt == BISHOP && (attacksFrom(BISHOP, a, p.all & ~BIT(from), c) & BIT(to))) return true;
+        return false;
+    }
+    return false;
+}
+
 static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *outDepth = nullptr) {
     nodes = 0; nodeLimit = lim.nodes; stopSearch = false; timeLimitMs = lim.movetime;
     tStart = chrono::steady_clock::now();
@@ -1165,6 +1195,27 @@ static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *
     Move firstLegal = 0; int nLegal = 0;
     for (int i = 0; i < root.n; i++) if (makeMove(p, root.m[i])) { unmakeMove(p); if (!firstLegal) firstLegal = root.m[i]; nLegal++; }
     if (!nLegal) return 0;
+    rootBan.clear();
+    if (OPEN_GUARD && p.hply <= 40 && isOpeningPos(p, npmOf(p, WHITE), npmOf(p, BLACK))) {
+        for (int i = 0; i < root.n; i++) {
+            Move m = root.m[i];
+            if (!guardBlocks(p, m) || !makeMove(p, m)) continue;
+            bool gc = inCheck(p);
+            unmakeMove(p);
+            if (!gc) rootBan.push_back(m);
+        }
+        if ((int)rootBan.size() >= nLegal) rootBan.clear();
+        if (!rootBan.empty()) {
+            if (!quietOut) {
+                printf("info string opening guard bans:");
+                for (Move m : rootBan) printf(" %s", moveStr(m).c_str());
+                printf("\n");
+            }
+            if (find(rootBan.begin(), rootBan.end(), firstLegal) != rootBan.end())
+                for (int i = 0; i < root.n; i++)
+                    if (find(rootBan.begin(), rootBan.end(), root.m[i]) == rootBan.end() && makeMove(p, root.m[i])) { unmakeMove(p); firstLegal = root.m[i]; break; }
+        }
+    }
     Move best = firstLegal; int bestScore = 0, doneDepth = 0;
     if (nLegal == 1 && lim.movetime > 0) { if (outScore) *outScore = 0; if (outDepth) *outDepth = 0; return best; }
     for (int depth = 1; depth <= lim.depth; depth++) {
@@ -1215,7 +1266,7 @@ static void setPosition(const string &line) {
 // Sicilian / King's Indian / French (Black). Ny andalana dia UCI ; ny key (transposition) no ampiasaina.
 // Ny White-lines dia mitahiry ny move White ihany ; ny Black-lines ny move Black ihany.
 // =====================================================================================
-static bool BOOK_ON = false;
+static bool BOOK_ON = true;
 static bool BOOK_RANDOM = true;
 static int BOOK_PLIES = 24;          // farany ambany: tsy mampiasa book rehefa mihoatra ny ply ireo
 struct BookEntry { U64 key; Move move; int weight; };
@@ -1235,6 +1286,21 @@ static const RepLine REPERTOIRE[] = {
     {WHITE, "Italian: Two Knights Ng5", "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 c6a5 c4b5 c7c6 d5c6 b7c6 b5e2"},
     {WHITE, "Scotch: 4...Nf6", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 g8f6 d4c6 b7c6 e4e5 d8e7 d1e2 f6d5 c2c4"},
     {WHITE, "Scotch: 4...Bc5", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 f8c5 c1e3 d8f6 c2c3 g8e7 f1c4"},
+    {WHITE, "Open Sicilian (...a6, any move order)", "e2e4 c7c5 g1f3 a7a6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e5 d4b3 f8e7 f2f3"},
+    {WHITE, "Open Sicilian ...d6", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1e3 e7e5 d4b3 c8e6 f2f3"},
+    {WHITE, "Open Sicilian ...Nc6", "e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g8f6 b1c3 d7d6 c1g5 e7e6 d1d2"},
+    {WHITE, "Open Sicilian ...e6", "e2e4 c7c5 g1f3 e7e6 d2d4 c5d4 f3d4 a7a6 f1d3 g8f6 e1g1"},
+    {WHITE, "Open Sicilian ...g6", "e2e4 c7c5 g1f3 g7g6 d2d4 c5d4 f3d4 f8g7 b1c3 b8c6 c1e3 g8f6 f1c4 e8g8 c4b3"},
+    {WHITE, "vs 1...a6 St George", "e2e4 a7a6 d2d4 b7b5 f1d3 c8b7 g1f3 e7e6 e1g1"},
+    {WHITE, "vs 1...a6 ...e6", "e2e4 a7a6 d2d4 e7e6 g1f3 d7d5 e4e5 c7c5 c2c3 b8c6 f1d3"},
+    {WHITE, "Pirc Austrian Attack", "e2e4 d7d6 d2d4 g8f6 b1c3 g7g6 f2f4 f8g7 g1f3 e8g8 f1d3"},
+    {WHITE, "Modern Austrian Attack", "e2e4 g7g6 d2d4 f8g7 b1c3 d7d6 f2f4 g8f6 g1f3 e8g8 f1d3"},
+    {WHITE, "French Classical", "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 c1g5 f8e7 e4e5 f6d7 g5e7 d8e7 f2f4 e8g8 g1f3"},
+    {WHITE, "French Winawer", "e2e4 e7e6 d2d4 d7d5 b1c3 f8b4 e4e5 c7c5 a2a3 b4c3 b2c3 g8e7 d1g4"},
+    {WHITE, "Caro-Kann Advance", "e2e4 c7c6 d2d4 d7d5 e4e5 c8f5 g1f3 e7e6 f1e2 c6c5 c1e3"},
+    {WHITE, "Caro-Kann Classical", "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5 e4g3 f5g6 h2h4 h7h6 g1f3 b8d7 h4h5 g6h7 f1d3 h7d3 d1d3"},
+    {WHITE, "Scandinavian", "e2e4 d7d5 e4d5 d8d5 b1c3 d5a5 d2d4 g8f6 g1f3 c7c6 f1c4 c8f5 c1d2"},
+    {WHITE, "Alekhine", "e2e4 g8f6 e4e5 f6d5 d2d4 d7d6 g1f3 c8g4 f1e2 e7e6 e1g1"},
     // ---------------- BLACK ----------------
     {BLACK, "Sicilian vs 1.e4 (Najdorf)", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1e3 e7e5 d4b3 c8e6"},
     {BLACK, "Sicilian: 6.Bg5", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1g5 e7e6 f2f4 f8e7"},
@@ -1253,6 +1319,7 @@ static const RepLine REPERTOIRE[] = {
     {BLACK, "French: Winawer", "e2e4 e7e6 d2d4 d7d5 b1c3 f8b4 e4e5 c7c5 a2a3 b4c3 b2c3 g8e7"},
 };
 
+static inline U64 bookKey(const Position &p) { return p.ep >= 0 ? (p.key ^ ZEPF[fileOf(p.ep)]) : p.key; }
 static void bookAdd(U64 key, Move m) {
     for (auto &b : BOOK) if (b.key == key && b.move == m) { b.weight++; return; }
     BOOK.push_back(BookEntry{key, m, 1});
@@ -1267,7 +1334,7 @@ static void buildBook() {
         while (is >> t) {
             Move m = findMoveStr(bpos, t);
             if (!m) { fprintf(stderr, "[book] andalana tsy ara-dalàna: '%s' ao amin'ny %s (ply %d)\n", t.c_str(), L.name, ply + 1); break; }
-            if (bpos.stm == L.color) bookAdd(bpos.key, m);
+            if (bpos.stm == L.color) bookAdd(bookKey(bpos), m);
             makeMove(bpos, m);
             ply++;
         }
@@ -1276,15 +1343,16 @@ static void buildBook() {
 static Move bookProbe(const Position &p) {
     if (!BOOK_ON || p.hply >= BOOK_PLIES || p.halfmove > 40) return 0;
     int total = 0;
-    for (auto &b : BOOK) if (b.key == p.key) total += b.weight;
+    U64 bk = bookKey(p);
+    for (auto &b : BOOK) if (b.key == bk) total += b.weight;
     if (!total) return 0;
     int pick = 0;
     if (BOOK_RANDOM) {
         int r = (int)(rnd64() % (U64)total), acc = 0;
-        for (auto &b : BOOK) if (b.key == p.key) { acc += b.weight; if (r < acc) { pick = b.move; break; } }
+        for (auto &b : BOOK) if (b.key == bk) { acc += b.weight; if (r < acc) { pick = b.move; break; } }
     } else {
         int bw = -1;
-        for (auto &b : BOOK) if (b.key == p.key && b.weight > bw) { bw = b.weight; pick = b.move; }
+        for (auto &b : BOOK) if (b.key == bk && b.weight > bw) { bw = b.weight; pick = b.move; }
     }
     return (Move)pick;
 }
@@ -1328,9 +1396,9 @@ static void goCommand(const string &line) {
 
 // ---- SELF-PLAY A/B : A = Race+Clean+Opening2 ON ; B = OFF ; ny safidy hafa (Ghost, Opening, Guide...) dia mitovy ho an'ny roa
 static Position spos;
-static void setAdv(bool on) { RACE_ON = on; CLEAN_ON = on; OPEN2_ON = on; }
+static void setAdv(bool on) { RACE_ON = on; CLEAN_ON = on; OPEN2_ON = on; OPEN_GUARD = on; }
 static void selfplay(int games, int depth) {
-    bool sR = RACE_ON, sC = CLEAN_ON, sO = OPEN2_ON, sQ = quietOut;
+    bool sR = RACE_ON, sC = CLEAN_ON, sO = OPEN2_ON, sG = OPEN_GUARD, sQ = quietOut;
     U64 sRng = rng_state;
     size_t sTT = ttMB;
     ttResize(16);
@@ -1363,9 +1431,9 @@ static void selfplay(int games, int depth) {
         fflush(stdout);
     }
     double pct = games ? 100.0 * (win + 0.5 * draw) / games : 0;
-    printf("selfplay depth %d: A(Race+Clean+Opening2) +%d =%d -%d  score %.1f%%\n", depth, win, draw, loss, pct);
+    printf("selfplay depth %d: A(Race+Clean+Opening2+Guard) +%d =%d -%d  score %.1f%%\n", depth, win, draw, loss, pct);
     fflush(stdout);
-    RACE_ON = sR; CLEAN_ON = sC; OPEN2_ON = sO; quietOut = sQ; rng_state = sRng;
+    RACE_ON = sR; CLEAN_ON = sC; OPEN2_ON = sO; OPEN_GUARD = sG; quietOut = sQ; rng_state = sRng;
     ttResize(sTT);
 }
 
@@ -1393,7 +1461,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 0.6\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default false\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default false\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default false\noption name GuideExt type check default false\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default false\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default false\noption name Opening2 type check default false\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Book type check default false\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 0.8\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default false\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default false\noption name GuideExt type check default false\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
@@ -1420,6 +1488,7 @@ int main(int argc, char **argv) {
             else if (name == "Clean") CLEAN_ON = (val == "true" || val == "1");
             else if (name == "Opening2") OPEN2_ON = (val == "true" || val == "1");
             else if (name == "Opening2Cap") OPEN2_CAP = max(0, atoi(val.c_str()));
+            else if (name == "OpeningGuard") OPEN_GUARD = (val == "true" || val == "1");
             else if (name == "Book") BOOK_ON = (val == "true" || val == "1");
             else if (name == "BookRandom") BOOK_RANDOM = (val == "true" || val == "1");
             else if (name == "BookPlies") BOOK_PLIES = max(0, atoi(val.c_str()));
