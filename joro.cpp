@@ -991,7 +991,6 @@ static double timeLimitMs = 0;
 static Move killers[MAXPLY + 4][2];
 static int historyT[2][64][64];
 static Move rootBest = 0;
-static long long statPawnSac = 0;                   // isan'ny extension pawn-sacrifice (hita ao amin'ny info string)
 static vector<Move> rootBan;                        // move ho sivanina amin'ny root (Opening Guard)
 static bool CLEAN_ON = true;                       // Clean Move : tsy ahena ny move mankany amin'ny attack, ahena ny retreat/passive
 static bool GUIDE_LMR = true, GUIDE_EXT = true;   // ghost ho mpitarika ny search (tsy ny eval)
@@ -1116,18 +1115,6 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
         ekSq = ek;
         ezone = KING_ATT[ek] | BIT(ek);
     }
-    // pawnCtx : attack efa misy, na rook/queen mifanandrify amin'ny king mpanohitra ankoatry ny sakana pawn (latent)
-    bool pawnCtx = atkCtx;
-    if (GUIDE_EXT && depth >= 3 && depth <= 8 && !chk) {
-        if (!atkCtx) { ekSq = kingSq(p, p.stm ^ 1); ezone = KING_ATT[ekSq] | BIT(ekSq); }
-        if (!pawnCtx) {
-            U64 noPawns = p.all & ~(p.bb[mk(WHITE, PAWN)] | p.bb[mk(BLACK, PAWN)]);
-            for (int q = ROOK; q <= QUEEN && !pawnCtx; q++) {
-                U64 sl = p.bb[mk(p.stm, q)];
-                while (sl) { int s2 = poplsb(sl); if (attacksFrom(q, s2, noPawns, p.stm) & ezone) { pawnCtx = true; break; } }
-            }
-        }
-    }
     MoveList l; genMoves(p, l, false);
     scoreMoves(p, l, ttMove, ply);
     int best = -INF, origAlpha = alpha, legal = 0;
@@ -1138,29 +1125,12 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
         Move m = l.m[i];
         if (root && !rootBan.empty() && find(rootBan.begin(), rootBan.end(), m) != rootBan.end()) continue;
         bool quiet = !(m & (F_CAP | F_EP)) && !mPromo(m);
-        bool aggr = false, sacr = false, retreat = false, pawnSac = false;
-        if (pawnCtx) {
-            // PAWN SACRIFICE : pawn (capture na tafiky) izay manala ny sakana ka mampifandray rook/queen amin'ny king mpanohitra
-            int from = mFrom(m), to = mTo(m), me = p.stm;
-            if (ptOf(p.sq[from]) == PAWN && !mPromo(m)) {
-                U64 occ2 = (p.all & ~BIT(from)) | BIT(to);
-                if (m & F_EP) occ2 &= ~BIT(to + (me == WHITE ? -8 : 8));
-                bool opens = false;
-                for (int q = ROOK; q <= QUEEN && !opens; q++) {
-                    U64 sl = p.bb[mk(me, q)];
-                    while (sl) {
-                        int s2 = poplsb(sl);
-                        if (popcnt(attacksFrom(q, s2, occ2, me) & ezone) > popcnt(attacksFrom(q, s2, p.all, me) & ezone)) { opens = true; break; }
-                    }
-                }
-                if (opens && ((m & F_CAP) || isAttacked(p, to, me ^ 1))) { pawnSac = true; aggr = true; }
-            }
-        }
+        bool aggr = false, sacr = false, retreat = false;
         if (atkCtx) {
             int from = mFrom(m), to = mTo(m), pt = ptOf(p.sq[from]), me = p.stm;
             if (pt != KING) {
                 int aTo = popcnt(attacksFrom(pt, to, p.all, me) & ezone), aFrom = popcnt(attacksFrom(pt, from, p.all, me) & ezone);
-                aggr = aggr || aTo > aFrom;
+                aggr = aTo > aFrom;
                 if ((m & F_CAP) && (ezone & BIT(to)) && p.sq[to] != NOPIECE && VALS[pt] > VALS[ptOf(p.sq[to])]) sacr = true;
                 // Clean Move : Unnecessary Retreat = quiet move miala amin'ny king mpanohitra, tsy mitsoka loza
                 if (CLEAN_ON && quiet && pt != PAWN && !aggr && distCheb(to, ekSq) > distCheb(from, ekSq) && !isAttacked(p, from, me ^ 1)) retreat = true;
@@ -1171,7 +1141,6 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
         bool givesCheck = inCheck(p);
         int newDepth = depth - 1, v;
         if (GUIDE_EXT && sacr && ply < MAXPLY / 2) newDepth++;
-        else if (GUIDE_EXT && pawnSac && ply < MAXPLY / 2 && depth <= 8) { newDepth++; statPawnSac++; }
         if (legal == 1) v = -search(p, newDepth, -beta, -alpha, ply + 1, true);
         else {
             int red = 0;
@@ -1279,7 +1248,7 @@ static bool guardBlocks(const Position &p, Move m) {
 }
 
 static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *outDepth = nullptr) {
-    nodes = 0; nodeLimit = lim.nodes; stopSearch = false; timeLimitMs = lim.movetime; statPawnSac = 0;
+    nodes = 0; nodeLimit = lim.nodes; stopSearch = false; timeLimitMs = lim.movetime;
     ROOT_US = p.stm;
     tStart = chrono::steady_clock::now();
     memset(killers, 0, sizeof killers);
@@ -1335,7 +1304,6 @@ static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *
         if (abs(score) > MATE - 200 && (!CLEAN_ON || depth >= MATE - abs(score))) break;   // Clean: hamarino ny mate fohy indrindra
         if (lim.movetime > 0 && elapsedMs() > lim.movetime * 0.6) break;   // tsy ho ampy ho an'ny depth manaraka
     }
-    if (!quietOut && statPawnSac) { printf("info string pawn-sacrifice extensions %lld\n", statPawnSac); fflush(stdout); }
     if (outScore) *outScore = bestScore;
     if (outDepth) *outDepth = doneDepth;
     return best;
@@ -1596,7 +1564,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 1.1\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 1.0\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
