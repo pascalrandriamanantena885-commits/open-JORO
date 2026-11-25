@@ -1,5 +1,5 @@
 // JORO C++ core v0.1  -  bitboard engine (UCI) : move generator, search, evaluation lite.
-// Dingana manaraka: ghost (threat, target, forcing), opening, root layer.
+// v0.7: GHOST afindra tanteraka ao amin'ny SEARCH ; REPERTOIRE ihany (KG/Italian/Scotch - Sicilian/KID/French) ; OPENING SCHOOL (5 zavatra).
 // v0.6: ATTACK RACE (ETA), CLEAN MOVE (search), OPENING 2 (castle prediction, Right/Wrong castle, passive dev).
 // Build: g++ -O3 -std=c++17 -o joro_cpp joro.cpp
 #include <algorithm>
@@ -485,7 +485,8 @@ static int endgameTerms(const Position &p, int npmW, int npmB) {
 
 // =====================================================================================
 // OPENING (tanjona JORO) - port avy amin'ny joro.py v1.4.1 : fivoarana tsy mampiaraka, afovoany,
-// castling ho an'ny king-ko, ary FANAKANANA ny castling an'ny mpanohitra (ghost).
+// castling ho an'ny king-ko, ary FANAKANANA ny castling an'ny mpanohitra (real attack ihany ao amin'ny eval ;
+// ny ghost dia ao amin'ny search : castleDenialGain).
 // =====================================================================================
 static bool OPENING_ON = true;
 static int OPEN_CAP = 100;
@@ -699,7 +700,7 @@ static double openingSide(const Position &p, int c) {
     }
     U64 pairA = c == WHITE ? BIT(SQ_D4) : BIT(SQ_D5), pairB = c == WHITE ? BIT(SQ_E4) : BIT(SQ_E5);
     if ((ownp & pairA) && (ownp & pairB)) v += 10;
-    // fanakanana ny castling an'ny mpanohitra (ghost)
+    // fanakanana ny castling an'ny mpanohitra (real attack ; ny ghost dia ao amin'ny search)
     int ok = kingSq(p, o), kf = fileOf(ok), kr = rankOf(ok), brank = o == WHITE ? 0 : 7;
     bool castled = kr == brank && (kf == 1 || kf == 2 || kf == 6 || kf == 7);
     if (!castled) {
@@ -708,35 +709,17 @@ static double openingSide(const Position &p, int c) {
             v += 40;
             if (kf != 4 || kr != brank) v += 15;
         } else {
-            U64 attG = 0;                                   // ghost: ny piece-ko ihany
-            for (int pt = PAWN; pt <= KING; pt++) {
-                U64 b = p.bb[mk(c, pt)];
-                while (b) { int s = poplsb(b); attG |= attacksFrom(pt, s, own, c); }
-            }
             bool kside = o == WHITE ? (p.castling & 1) : (p.castling & 4);
             bool qside = o == WHITE ? (p.castling & 2) : (p.castling & 8);
             for (int side = 0; side < 2; side++) {
                 if (!(side == 0 ? kside : qside)) continue;
                 static const int KF[3] = {4, 5, 6}, QF[3] = {4, 3, 2};
-                int real = 0, gh = 0;
+                int real = 0;
                 for (int i = 0; i < 3; i++) {
                     int sq = brank * 8 + (side == 0 ? KF[i] : QF[i]);
                     if (isAttacked(p, sq, c)) real++;
-                    if (attG & BIT(sq)) gh++;
                 }
-                v += 10 * real + 4 * max(gh - real, 0);
-            }
-            if (OPEN2_ON) {                                  // Wrong Castle antenaina: ny pièce-ko mikendry ilay elatra
-                int pcs = predictCastle(p, o);
-                if (pcs == CP_SHORT || pcs == CP_LONG) {
-                    int q = shieldQuality(p, o, pcs == CP_LONG ? 1 : 0);
-                    if (q <= 2) {
-                        int f0 = pcs == CP_SHORT ? 5 : 0;
-                        U64 wing = 0;
-                        for (int ff = f0; ff < f0 + 3; ff++) for (int rr = 0; rr < 3; rr++) wing |= BIT(relSq(o, ff, rr));
-                        v += min(popcnt(attG & wing), 6) * max(1, (3 - q) / 2);
-                    }
-                }
+                v += 10 * real;
             }
             if (p.stm == o && inCheck(p)) v += 20;
         }
@@ -757,69 +740,159 @@ static int openingTerms(const Position &p) {
 
 
 // =====================================================================================
-// GHOST (G1) - port maivana avy amin'ny joro.py : piece-ko vs king mpanohitra raha tsy misy defense.
-// coverage ghost vs real (cost = efa mila sacrifice/open line), pattern checkmate (distance), tempo,
-// ary decide (IGNORE/ALLOW/CARE) mba hanapahana ny lanjan'ny attack mpanohitra.
+// OPENING SCHOOL - ny filozofian'i JORO :
+//   « Ny opening dia tsy natao hahazoana toerana tsara fotsiny, fa natao hanomanana ny fandravana
+//     ny fiarovan'ny King adversaire. »
+// Tsy misy opening mandresy ho azy : ny repertoire dia mahomby rehefa fantatra ny plans sy ny tactical patterns ao anatiny.
+// Zavatra 5 tokony hampianarina mandritra ny Opening :
+//   1. King Weakness Detection        -> kingWeakness()  (eval)
+//   2. Attack Preparation             -> attackPrep()    (eval)
+//   3. Pawn Structure Intelligence    -> pawnIntel()     (eval)
+//   4. Sacrifice Evaluation           -> sacComp() (eval : compensation) + sacrificeVerdict() (search : mendrika / tsy mendrika)
+//   5. Opening-to-Middlegame Transition -> transition()  (eval)
 // =====================================================================================
-static bool GHOST_ON = true;
-static int GHOST_W = 25;        // % (lanja)
-static int GHOST_CAP = 80;      // cp
-static int GHOST_ALERT = 10;    // attack_power farany ambany hampiasana ghost
-struct Threat { int score; int tempo; int cost; };
+static bool SCHOOL_ON = true;
+static int SCHOOL_CAP = 90;
+static const int SCHOOL_NPM = 4200;            // manomboka amin'ny opening ka hatramin'ny middlegame aloha
 
-static double patternBonus(const Position &p, int c, int eks) {
-    int ksq = kingSq(p, c);
-    int ds[5][10], cnt[5];
-    for (int t = 0; t < 5; t++) {
-        cnt[t] = 0;
-        U64 b = p.bb[mk(c, t)];
-        while (b && cnt[t] < 10) ds[t][cnt[t]++] = distCheb(poplsb(b), eks);
-        sort(ds[t], ds[t] + cnt[t]);
+static U64 attackedBy(const Position &p, int c) {
+    U64 a = 0;
+    for (int pt = PAWN; pt <= QUEEN; pt++) {
+        U64 b = p.bb[mk(c, pt)];
+        while (b) a |= attacksFrom(pt, poplsb(b), p.all, c);
     }
-    int f = fileOf(eks), r = rankOf(eks);
-    int edge = min(min(f, 7 - f), min(r, 7 - r));
-    double edgeFactor = 1 + (3 - edge) * 0.25;
-    struct Pat { int need[5]; double w; };
-    static const Pat PATS[] = {
-        {{0, 0, 0, 0, 1}, 1.2}, {{0, 0, 0, 1, 1}, 1.3}, {{0, 0, 1, 0, 1}, 1.1}, {{0, 1, 0, 0, 1}, 1.1},
-        {{0, 0, 0, 1, 0}, 1.0}, {{0, 0, 0, 2, 0}, 1.3}, {{0, 1, 0, 1, 0}, 1.0}, {{0, 0, 1, 1, 0}, 1.0},
-        {{0, 2, 0, 0, 0}, 0.8}, {{0, 1, 1, 0, 0}, 0.9}, {{0, 0, 2, 0, 0}, 0.8}, {{0, 1, 2, 0, 0}, 1.0},
-        {{2, 0, 0, 0, 0}, 0.7}, {{1, 0, 0, 1, 0}, 1.0}, {{1, 1, 0, 0, 0}, 0.9}, {{1, 0, 0, 0, 1}, 1.1},
-    };
-    double best = 0;
-    for (const Pat &pt : PATS) {
-        bool ok = true;
-        for (int t = 0; t < 5; t++) if (cnt[t] < pt.need[t]) { ok = false; break; }
-        if (!ok) continue;
-        double sum = distCheb(ksq, eks); int n = 1;
-        for (int t = 0; t < 5; t++)
-            for (int i = 0; i < pt.need[t]; i++) { sum += ds[t][i]; n++; }
-        double val = max(0.0, 8 - sum / n) * 3 * pt.w * edgeFactor;
-        if (val > best) best = val;
-    }
-    return best;
+    return a;
+}
+static inline int matOf(const Position &p, int c) {
+    int m = 0;
+    for (int pt = PAWN; pt <= QUEEN; pt++) m += VALS[pt] * popcnt(p.bb[mk(c, pt)]);
+    return m;
+}
+// ny faritra manodidina ny king-n'i o (3 colonne x 3 rang) + ny king zone : ny toerana hanatanterahana ny attack
+static U64 wingZone(const Position &p, int o) {
+    int ek = kingSq(p, o), kf = fileOf(ek);
+    U64 w = KING_ATT[ek] | BIT(ek);
+    for (int f = max(0, kf - 1); f <= min(7, kf + 1); f++)
+        for (int rr = 0; rr < 3; rr++) w |= BIT(relSq(o, f, rr));
+    return w;
 }
 
-static Threat ghostThreat(const Position &p, int c) {
-    int o = c ^ 1, eks = kingSq(p, o);
-    U64 zone = KING_ATT[eks], attG = 0, attR = 0, gOcc = p.occ[c] | BIT(eks);
-    for (int pt = PAWN; pt <= KING; pt++) {
+// 1. KING WEAKNESS DETECTION : fahalemena manodidina ny king-n'i (c^1), ho an'ny mpanafika c
+static int kingWeakness(const Position &p, int c) {
+    int o = c ^ 1, ek = kingSq(p, o), kf = fileOf(ek), kr = rankOf(ek), br = o == WHITE ? 0 : 7;
+    U64 ownp = p.bb[mk(o, PAWN)], allp = p.bb[mk(WHITE, PAWN)] | p.bb[mk(BLACK, PAWN)];
+    U64 zone = KING_ATT[ek] | BIT(ek), atk = attackedBy(p, c);
+    int w = 0;
+    bool castled = isCastled(p, o);
+    if (!castled) {
+        int rights = o == WHITE ? (p.castling & 3) : (p.castling & 12);
+        if (kr != br) w += 25;                                   // king nandeha anaty afovoany
+        else if (kf == 3 || kf == 4) w += rights ? 8 : 20;       // mbola any afovoany (tsy afaka mandray castle = ratsy kokoa)
+    }
+    for (int f = max(0, kf - 1); f <= min(7, kf + 1); f++) {     // Pawn Shield : tsy ampy / nandroso loatra
+        int rel = -1;
+        U64 b = ownp & FILE_BB[f];
+        while (b) { int s = poplsb(b); int r = o == WHITE ? rankOf(s) : 7 - rankOf(s); if (rel < 0 || r < rel) rel = r; }
+        if (rel < 0) w += (allp & FILE_BB[f]) ? 8 : 12;          // colonne misokatra (12) / semi-open (8)
+        else if (rel == 2) w += 3;
+        else if (rel >= 3) w += 6;
+    }
+    U64 pa = 0, b2 = ownp;
+    while (b2) pa |= PAWN_ATT[o][poplsb(b2)];
+    w += 2 * min(popcnt(zone & ~pa & ~p.occ[o] & atk), 5);       // lavaka (toerana tsy arovan'ny pawn) izay tratry ny piece-ko
+    if (!castled && kf == 4) {                                   // f2/f7 : arovan'ny king ihany
+        int sq = relSq(o, 5, 1);
+        if (ownp & BIT(sq)) w += 4 * min(popcnt(attackersTo(p, sq, c)), 3);
+    }
+    return min(w, 60);
+}
+
+// 2. ATTACK PREPARATION : manangona pièces maromaro alohan'ny hanaovana attaque
+static int attackPrep(const Position &p, int c) {
+    int o = c ^ 1, n = 0, dev = undeveloped(p, c);
+    U64 wing = wingZone(p, o);
+    bool queenIn = false;
+    for (int pt = KNIGHT; pt <= QUEEN; pt++) {
         U64 b = p.bb[mk(c, pt)];
         while (b) {
             int s = poplsb(b);
-            attG |= attacksFrom(pt, s, gOcc, c);
-            attR |= attacksFrom(pt, s, p.all, c);
+            bool home = rankOf(s) == (c == WHITE ? 0 : 7);
+            if (home && pt != ROOK && pt != QUEEN) continue;     // tsy mbola nivoaka
+            if (attacksFrom(pt, s, p.all, c) & wing) { n++; if (pt == QUEEN) queenIn = true; }
         }
     }
-    int gcov = popcnt(zone & attG), rcov = popcnt(zone & attR);
-    int blocked = popcnt(zone & p.occ[o] & ~attG);
-    int freeSq = popcnt(zone) - gcov - blocked;
-    int cost = max(0, gcov - rcov);
-    double score = rcov * 12 + cost * 6 + patternBonus(p, c, eks);
-    if (attG & BIT(eks)) score += 15;
-    int tempo = freeSq <= 3 ? (freeSq <= 1 ? 2 : 3) : (freeSq <= 5 ? 5 : 9);
-    return Threat{(int)score, tempo, cost};
+    int v = 0;
+    if (n >= 3) v = 18 + 8 * min(n - 3, 3);
+    else if (n == 2) v = 8;
+    int pawnsAdv = 0;
+    U64 b = p.bb[mk(c, PAWN)];
+    while (b) { int s = poplsb(b); int r = c == WHITE ? rankOf(s) : 7 - rankOf(s); if (r >= 3 && (wing & FILE_BB[fileOf(s)])) pawnsAdv++; }
+    U64 q = p.bb[mk(c, QUEEN)];
+    bool qOut = q && !(q & BIT(c == WHITE ? 3 : 59));
+    if (queenIn && qOut && (n - 1) < 2 && dev >= 2) v -= 15;     // dame mitokana : attaque tsy vita
+    if (pawnsAdv >= 2 && n < 2) v -= 8;                          // pawn storm tsy misy piece
+    if (dev == 0 && n >= 2) v += 6;
+    return max(-25, min(40, v));
 }
+
+// 3. PAWN STRUCTURE INTELLIGENCE : mamantatra ny pawn tokony hotafihina (isolated, doubled, backward, f2/f7)
+static int pawnIntel(const Position &p, int c) {
+    int o = c ^ 1, total = 0;
+    U64 op = p.bb[mk(o, PAWN)], b = op;
+    bool castled = isCastled(p, o);
+    while (b) {
+        int s = poplsb(b), f = fileOf(s), r = o == WHITE ? rankOf(s) : 7 - rankOf(s);
+        U64 adj = ((f > 0 ? FILE_BB[f - 1] : 0) | (f < 7 ? FILE_BB[f + 1] : 0)) & op;
+        int wgt = 0;
+        if (!adj) wgt += 6;                                       // isolated
+        else {
+            int minRel = 8;
+            U64 a = adj;
+            while (a) { int s2 = poplsb(a); int r2 = o == WHITE ? rankOf(s2) : 7 - rankOf(s2); minRel = min(minRel, r2); }
+            if (minRel > r && r >= 1) wgt += 4;                   // backward
+        }
+        if (popcnt(op & FILE_BB[f]) > 1) wgt += 3;                // doubled
+        if (!castled && f == 5 && r == 1) wgt += 5;               // f2/f7 alohan'ny castle
+        if (!wgt) continue;
+        int att = popcnt(attackersTo(p, s, c)), def = popcnt(attackersTo(p, s, o));
+        if (att) total += wgt * (1 + min(att, 3)) / 2 + (att > def ? wgt : 0);
+    }
+    return min(total, 40);
+}
+
+// 4. SACRIFICE EVALUATION (eval) : raha efa very pawn/pièce, ny vola mendrika raha lehibe ny fahalemena + ny attack vonona
+static int sacComp(const Position &p, int c, int weak, int prep) {
+    int diff = matOf(p, c) - matOf(p, c ^ 1);
+    if (diff > -60 || diff < -320) return 0;
+    int need = diff < -150 ? 55 : 35, tot = weak + prep;
+    if (tot < need) return 0;
+    return min(45, tot * 2 / 3);
+}
+
+// 5. OPENING-TO-MIDDLEGAME TRANSITION : tsy mijanona amin'ny avantage ; rehefa vita ny fivoarana dia attaque tena izy
+static int transition(const Position &p, int c) {
+    int o = c ^ 1, dev = undeveloped(p, c), devO = undeveloped(p, o);
+    if (dev > 1) return 0;                                       // mbola opening
+    U64 wing = wingZone(p, o);
+    int aim = 0;
+    for (int pt = KNIGHT; pt <= QUEEN; pt++) {
+        U64 b = p.bb[mk(c, pt)];
+        while (b) if (attacksFrom(pt, poplsb(b), p.all, c) & wing) aim++;
+    }
+    int v = aim >= 2 ? min(30, 8 * (aim - 1)) : -10;             // -10 = avantage tsy novaina ho attaque
+    if (devO > dev) v += 4 * (devO - dev);
+    return v;
+}
+
+static int schoolSide(const Position &p, int c) {
+    int w = kingWeakness(p, c), pr = attackPrep(p, c);
+    return w + pr + pawnIntel(p, c) + sacComp(p, c, w, pr) + transition(p, c);
+}
+static int schoolTerms(const Position &p) {
+    int d = schoolSide(p, WHITE) - schoolSide(p, BLACK);
+    return max(-SCHOOL_CAP, min(SCHOOL_CAP, d));
+}
+
 
 // =====================================================================================
 // ATTACK RACE (ETA) - tombana ny isan'ny moves (an'ny tenany) ilaina hatramin'ny mate :
@@ -921,32 +994,6 @@ static int raceTerm(const Position &p, const Eta e[2]) {
     return max(-RACE_CAP, min(RACE_CAP, v));
 }
 
-// care[c]: ohatrinona no ahalan'i c miraharaha ny attack mpanohitra (0 = laisse tomber, 1 = mitandrina)
-static double decideFactor(const Threat &mine, const Threat &theirs, bool meToMove) {
-    if (theirs.tempo >= 9 || theirs.score < 25) return 0.0;
-    double myT = mine.tempo - (meToMove ? 0.5 : 0.0), thT = theirs.tempo - (meToMove ? 0.0 : 0.5);
-    if (mine.tempo <= 4 && myT < thT && mine.score >= theirs.score * 0.8) return 0.3;
-    if (theirs.tempo >= 5) return 0.6;
-    if (theirs.cost >= 3 && theirs.tempo >= 3) return 0.5;
-    return 1.0;
-}
-static int ghostTerm(const Position &p, const Eta *E) {
-    Threat T[2] = {ghostThreat(p, WHITE), ghostThreat(p, BLACK)};
-    double care[2];
-    if (RACE_ON) {                                   // Attack Race : ETA no mamaritra ny CARE / LET IT GO
-        Eta loc[2];
-        if (!E) { loc[0] = attackEta(p, WHITE); loc[1] = attackEta(p, BLACK); E = loc; }
-        double adj[2] = {E[WHITE].eta - (p.stm == WHITE ? 0.5 : 0.0), E[BLACK].eta - (p.stm == BLACK ? 0.5 : 0.0)};
-        for (int c = 0; c < 2; c++) care[c] = (T[c ^ 1].score < 25) ? 0.0 : raceCare(E[c], E[c ^ 1], adj[c], adj[c ^ 1]);
-    } else {
-        care[WHITE] = decideFactor(T[WHITE], T[BLACK], p.stm == WHITE);
-        care[BLACK] = decideFactor(T[BLACK], T[WHITE], p.stm == BLACK);
-    }
-    double delta = T[WHITE].score * care[BLACK] - T[BLACK].score * care[WHITE];
-    int v = (int)(GHOST_W / 100.0 * delta);
-    return max(-GHOST_CAP, min(GHOST_CAP, v));
-}
-
 static int evaluate(const Position &p) {
     int npmW = npmOf(p, WHITE), npmB = npmOf(p, BLACK);
     bool eg = (npmW + npmB) <= 2800;
@@ -960,13 +1007,173 @@ static int evaluate(const Position &p) {
     if (OPEN2_ON && npmW + npmB >= OPEN2_NPM) score += castleStructTerms(p);
     if (OPEN2_ON && ROOT_US >= 0 && npmW + npmB >= OPEN2_NPM) { int d = castleVsOpp(p, ROOT_US); score += ROOT_US == WHITE ? d : -d; }
     if (STORM_ON && !eg) score += stormTerms(p);
-    Eta E[2]; bool haveE = false;
+    if (SCHOOL_ON && npmW + npmB >= SCHOOL_NPM) score += schoolTerms(p);
+    Eta E[2];
     if (RACE_ON && (aw >= RACE_ALERT || ab >= RACE_ALERT)) {
-        E[WHITE] = attackEta(p, WHITE); E[BLACK] = attackEta(p, BLACK); haveE = true;
+        E[WHITE] = attackEta(p, WHITE); E[BLACK] = attackEta(p, BLACK);
         score += raceTerm(p, E);
     }
-    if (GHOST_ON && (aw >= GHOST_ALERT || ab >= GHOST_ALERT)) score += ghostTerm(p, haveE ? E : nullptr);
     return p.stm == WHITE ? score : -score;
+}
+
+// =====================================================================================
+// GHOST SEARCH GUIDE - ny ghost rehetra dia ao amin'ny SEARCH ihany (tsy misy ao amin'ny evaluate intsony).
+// Ghost = ny piece-ko vs king mpanohitra raha tsy misy defense (ny piece mpanohitra tsy sakana).
+//   - ghostThreat      : coverage ghost vs real (cost = efa mila sacrifice/open line), pattern checkmate, tempo
+//   - CARE / LET IT GO : (Race ETA na decideFactor) mamaritra ny fiarovana : tsy ahena raha CARE, ahena raha LET IT GO
+//   - ghostGain        : move manampy ny coverage ghost amin'ny king mpanohitra = aggressive (tsy ahena, voalohany)
+//   - castleDenialGain : move mikendry ny lalan'ny castling mpanohitra (ex-opening ghost)
+//   - sacrificeVerdict : Sacrifice Evaluation (opening school) -> mendrika (+1 depth) / tsy mendrika (ahena)
+//   - forcing          : ghost tempo <= 3 ary move manampy ny coverage -> +1 depth
+// =====================================================================================
+static bool GHOST_ON = true;
+static int GHOST_ALERT = 10;      // attack_power farany ambany hampiasana ghost
+static int GHOST_ORDER = 6000;    // bonus ordering ambony indrindra ho an'ny quiet move ghost
+struct Threat { int score; int tempo; int cost; };
+
+static double patternBonus(const Position &p, int c, int eks) {
+    int ksq = kingSq(p, c);
+    int ds[5][10], cnt[5];
+    for (int t = 0; t < 5; t++) {
+        cnt[t] = 0;
+        U64 b = p.bb[mk(c, t)];
+        while (b && cnt[t] < 10) ds[t][cnt[t]++] = distCheb(poplsb(b), eks);
+        sort(ds[t], ds[t] + cnt[t]);
+    }
+    int f = fileOf(eks), r = rankOf(eks);
+    int edge = min(min(f, 7 - f), min(r, 7 - r));
+    double edgeFactor = 1 + (3 - edge) * 0.25;
+    struct Pat { int need[5]; double w; };
+    static const Pat PATS[] = {
+        {{0, 0, 0, 0, 1}, 1.2}, {{0, 0, 0, 1, 1}, 1.3}, {{0, 0, 1, 0, 1}, 1.1}, {{0, 1, 0, 0, 1}, 1.1},
+        {{0, 0, 0, 1, 0}, 1.0}, {{0, 0, 0, 2, 0}, 1.3}, {{0, 1, 0, 1, 0}, 1.0}, {{0, 0, 1, 1, 0}, 1.0},
+        {{0, 2, 0, 0, 0}, 0.8}, {{0, 1, 1, 0, 0}, 0.9}, {{0, 0, 2, 0, 0}, 0.8}, {{0, 1, 2, 0, 0}, 1.0},
+        {{2, 0, 0, 0, 0}, 0.7}, {{1, 0, 0, 1, 0}, 1.0}, {{1, 1, 0, 0, 0}, 0.9}, {{1, 0, 0, 0, 1}, 1.1},
+    };
+    double best = 0;
+    for (const Pat &pt : PATS) {
+        bool ok = true;
+        for (int t = 0; t < 5; t++) if (cnt[t] < pt.need[t]) { ok = false; break; }
+        if (!ok) continue;
+        double sum = distCheb(ksq, eks); int n = 1;
+        for (int t = 0; t < 5; t++)
+            for (int i = 0; i < pt.need[t]; i++) { sum += ds[t][i]; n++; }
+        double val = max(0.0, 8 - sum / n) * 3 * pt.w * edgeFactor;
+        if (val > best) best = val;
+    }
+    return best;
+}
+
+static Threat ghostThreat(const Position &p, int c) {
+    int o = c ^ 1, eks = kingSq(p, o);
+    U64 zone = KING_ATT[eks], attG = 0, attR = 0, gOcc = p.occ[c] | BIT(eks);
+    for (int pt = PAWN; pt <= KING; pt++) {
+        U64 b = p.bb[mk(c, pt)];
+        while (b) {
+            int s = poplsb(b);
+            attG |= attacksFrom(pt, s, gOcc, c);
+            attR |= attacksFrom(pt, s, p.all, c);
+        }
+    }
+    int gcov = popcnt(zone & attG), rcov = popcnt(zone & attR);
+    int blocked = popcnt(zone & p.occ[o] & ~attG);
+    int freeSq = popcnt(zone) - gcov - blocked;
+    int cost = max(0, gcov - rcov);
+    double score = rcov * 12 + cost * 6 + patternBonus(p, c, eks);
+    if (attG & BIT(eks)) score += 15;
+    int tempo = freeSq <= 3 ? (freeSq <= 1 ? 2 : 3) : (freeSq <= 5 ? 5 : 9);
+    return Threat{(int)score, tempo, cost};
+}
+
+// fallback raha tsy mampiasa Race : ohatrinona no ahalan'i "mine" miraharaha ny attack mpanohitra
+static double decideFactor(const Threat &mine, const Threat &theirs, bool meToMove) {
+    if (theirs.tempo >= 9 || theirs.score < 25) return 0.0;
+    double myT = mine.tempo - (meToMove ? 0.5 : 0.0), thT = theirs.tempo - (meToMove ? 0.0 : 0.5);
+    if (mine.tempo <= 4 && myT < thT && mine.score >= theirs.score * 0.8) return 0.3;
+    if (theirs.tempo >= 5) return 0.6;
+    if (theirs.cost >= 3 && theirs.tempo >= 3) return 0.5;
+    return 1.0;
+}
+
+struct GhostCtx {
+    bool on = false;
+    Threat mine{0, 9, 0}, theirs{0, 9, 0};
+    double care = 0.0;               // 0 = LET IT GO, 1 = CARE (mitandrina ny attack mpanohitra)
+    U64 ezone = 0, mzone = 0, gOcc = 0;
+};
+static GhostCtx ghostContext(const Position &p) {
+    GhostCtx g;
+    int me = p.stm, o = me ^ 1;
+    if (attackPower(p, me) < GHOST_ALERT && attackPower(p, o) < GHOST_ALERT) return g;
+    g.on = true;
+    g.mine = ghostThreat(p, me);
+    g.theirs = ghostThreat(p, o);
+    if (g.theirs.score < 25) g.care = 0.0;
+    else if (RACE_ON) {
+        Eta em = attackEta(p, me), et = attackEta(p, o);
+        g.care = raceCare(em, et, em.eta - 0.5, (double)et.eta);
+    } else g.care = decideFactor(g.mine, g.theirs, true);
+    int eks = kingSq(p, o), mks = kingSq(p, me);
+    g.ezone = KING_ATT[eks] | BIT(eks);
+    g.mzone = KING_ATT[mks] | BIT(mks);
+    g.gOcc = p.occ[me] | BIT(eks);
+    return g;
+}
+
+// coverage ghost : piece mihetsika from->to ka manampy firy ny toerana ao amin'ny king zone mpanohitra (ny piece mpanohitra tsy sakana)
+static inline int ghostGain(int pt, int from, int to, int me, const GhostCtx &g) {
+    return popcnt(attacksFrom(pt, to, g.gOcc, me) & g.ezone) - popcnt(attacksFrom(pt, from, g.gOcc, me) & g.ezone);
+}
+static inline int defenseGain(const Position &p, int pt, int from, int to, int me, const GhostCtx &g) {
+    return popcnt(attacksFrom(pt, to, p.all, me) & g.mzone) - popcnt(attacksFrom(pt, from, p.all, me) & g.mzone);
+}
+// FANAKANANA ny castling mpanohitra : ny toerana ho lalovan'ny king (ghost : ny piece-ko ihany no sakana)
+static U64 castlePath(const Position &p, int o) {
+    if (isCastled(p, o)) return 0;
+    int br = o == WHITE ? 0 : 7;
+    bool ks = o == WHITE ? (p.castling & 1) : (p.castling & 4), qs = o == WHITE ? (p.castling & 2) : (p.castling & 8);
+    U64 m = 0;
+    if (ks) m |= BIT(br * 8 + 5) | BIT(br * 8 + 6);
+    if (qs) m |= BIT(br * 8 + 3) | BIT(br * 8 + 2);
+    return m;
+}
+static inline int castleDenialGain(const Position &p, int pt, int from, int to, int me, U64 path) {
+    return popcnt(attacksFrom(pt, to, p.occ[me], me) & path) - popcnt(attacksFrom(pt, from, p.occ[me], me) & path);
+}
+
+// SACRIFICE EVALUATION (search) : 0 = tsy sacrifice, +1 = mendrika (compensation ampy), -1 = tsy mendrika
+static int sacrificeVerdict(const Position &p, Move m, int gg, const GhostCtx &g, int weak, int prep) {
+    int me = p.stm, o = me ^ 1, from = mFrom(m), to = mTo(m), pt = ptOf(p.sq[from]);
+    if (pt == KING || (m & (F_CASTLE | F_EP)) || mPromo(m)) return 0;
+    int victim = p.sq[to] != NOPIECE ? VALS[ptOf(p.sq[to])] : 0;
+    U64 oa = attackersTo(p, to, o);
+    if (!oa) return 0;
+    int oppMin = 20000;
+    for (int t = PAWN; t <= QUEEN; t++) if (oa & p.bb[mk(o, t)]) { oppMin = VALS[t]; break; }
+    U64 myDef = attackersTo(p, to, me) & ~BIT(from);
+    int loss = 0;
+    if (!myDef) loss = VALS[pt] - victim;
+    else if (oppMin < VALS[pt]) loss = VALS[pt] - oppMin - victim;
+    if (loss < 60) return 0;
+    int comp = weak + prep + 10 * max(gg, 0);
+    bool worth = comp >= 25 + loss / 5;
+    if (loss >= 250 && g.mine.tempo > 5 && gg < 2) worth = false;
+    return worth ? 1 : -1;
+}
+
+// ordering : quiet move ghost / castle-denial -> aloha
+static void ghostOrder(const Position &p, MoveList &l, const GhostCtx &g, U64 cpath, Move ttMove) {
+    int me = p.stm;
+    for (int i = 0; i < l.n; i++) {
+        Move m = l.m[i];
+        if (m == ttMove || (m & (F_CAP | F_EP | F_CASTLE)) || mPromo(m)) continue;
+        int from = mFrom(m), to = mTo(m), pt = ptOf(p.sq[from]);
+        if (pt == KING) continue;
+        int b = 0;
+        if (g.on) b += 1500 * max(0, ghostGain(pt, from, to, me, g));
+        if (cpath) b += 1500 * max(0, castleDenialGain(p, pt, from, to, me, cpath));
+        if (b) l.sc[i] += min(GHOST_ORDER, b);
+    }
 }
 
 // =====================================================================================
@@ -991,6 +1198,7 @@ static double timeLimitMs = 0;
 static Move killers[MAXPLY + 4][2];
 static int historyT[2][64][64];
 static Move rootBest = 0;
+static long long statPawnSac = 0;                   // isan'ny extension pawn-sacrifice (hita ao amin'ny info string)
 static vector<Move> rootBan;                        // move ho sivanina amin'ny root (Opening Guard)
 static bool CLEAN_ON = true;                       // Clean Move : tsy ahena ny move mankany amin'ny attack, ahena ny retreat/passive
 static bool GUIDE_LMR = true, GUIDE_EXT = true;   // ghost ho mpitarika ny search (tsy ny eval)
@@ -1115,8 +1323,30 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
         ekSq = ek;
         ezone = KING_ATT[ek] | BIT(ek);
     }
+    // pawnCtx : attack efa misy, na rook/queen mifanandrify amin'ny king mpanohitra ankoatry ny sakana pawn (latent)
+    bool pawnCtx = atkCtx;
+    if (GUIDE_EXT && depth >= 3 && depth <= 8 && !chk) {
+        if (!atkCtx) { ekSq = kingSq(p, p.stm ^ 1); ezone = KING_ATT[ekSq] | BIT(ekSq); }
+        if (!pawnCtx) {
+            U64 noPawns = p.all & ~(p.bb[mk(WHITE, PAWN)] | p.bb[mk(BLACK, PAWN)]);
+            for (int q = ROOK; q <= QUEEN && !pawnCtx; q++) {
+                U64 sl = p.bb[mk(p.stm, q)];
+                while (sl) { int s2 = poplsb(sl); if (attacksFrom(q, s2, noPawns, p.stm) & ezone) { pawnCtx = true; break; } }
+            }
+        }
+    }
+    // GHOST (ao amin'ny search) : context ho an'ny side mihetsika
+    GhostCtx gc;
+    U64 cpath = 0;
+    int sWeak = 0, sPrep = 0;
+    if (GHOST_ON && depth >= 3 && !chk) {
+        gc = ghostContext(p);
+        if (isOpeningPos(p, npmOf(p, WHITE), npmOf(p, BLACK))) cpath = castlePath(p, p.stm ^ 1);
+        if (gc.on) { sWeak = kingWeakness(p, p.stm); sPrep = attackPrep(p, p.stm); }
+    }
     MoveList l; genMoves(p, l, false);
     scoreMoves(p, l, ttMove, ply);
+    if (gc.on || cpath) ghostOrder(p, l, gc, cpath, ttMove);
     int best = -INF, origAlpha = alpha, legal = 0;
     Move bestMove = 0;
     Move quietsTried[64]; int nq = 0;
@@ -1125,15 +1355,48 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
         Move m = l.m[i];
         if (root && !rootBan.empty() && find(rootBan.begin(), rootBan.end(), m) != rootBan.end()) continue;
         bool quiet = !(m & (F_CAP | F_EP)) && !mPromo(m);
-        bool aggr = false, sacr = false, retreat = false;
+        bool aggr = false, sacr = false, retreat = false, pawnSac = false;
+        int sacV = 0, defGain = 0;
+        bool ghostFx = false;
+        if (pawnCtx) {
+            // PAWN SACRIFICE : pawn (capture na tafiky) izay manala ny sakana ka mampifandray rook/queen amin'ny king mpanohitra
+            int from = mFrom(m), to = mTo(m), me = p.stm;
+            if (ptOf(p.sq[from]) == PAWN && !mPromo(m)) {
+                U64 occ2 = (p.all & ~BIT(from)) | BIT(to);
+                if (m & F_EP) occ2 &= ~BIT(to + (me == WHITE ? -8 : 8));
+                bool opens = false;
+                for (int q = ROOK; q <= QUEEN && !opens; q++) {
+                    U64 sl = p.bb[mk(me, q)];
+                    while (sl) {
+                        int s2 = poplsb(sl);
+                        if (popcnt(attacksFrom(q, s2, occ2, me) & ezone) > popcnt(attacksFrom(q, s2, p.all, me) & ezone)) { opens = true; break; }
+                    }
+                }
+                if (opens && ((m & F_CAP) || isAttacked(p, to, me ^ 1))) { pawnSac = true; aggr = true; }
+            }
+        }
         if (atkCtx) {
             int from = mFrom(m), to = mTo(m), pt = ptOf(p.sq[from]), me = p.stm;
             if (pt != KING) {
                 int aTo = popcnt(attacksFrom(pt, to, p.all, me) & ezone), aFrom = popcnt(attacksFrom(pt, from, p.all, me) & ezone);
-                aggr = aTo > aFrom;
+                aggr = aggr || aTo > aFrom;
                 if ((m & F_CAP) && (ezone & BIT(to)) && p.sq[to] != NOPIECE && VALS[pt] > VALS[ptOf(p.sq[to])]) sacr = true;
                 // Clean Move : Unnecessary Retreat = quiet move miala amin'ny king mpanohitra, tsy mitsoka loza
                 if (CLEAN_ON && quiet && pt != PAWN && !aggr && distCheb(to, ekSq) > distCheb(from, ekSq) && !isAttacked(p, from, me ^ 1)) retreat = true;
+            }
+        }
+        if (gc.on || cpath) {
+            int from = mFrom(m), to = mTo(m), pt = ptOf(p.sq[from]), me = p.stm;
+            if (pt != KING && !(m & F_CASTLE)) {
+                int gg = gc.on ? ghostGain(pt, from, to, me, gc) : 0;
+                int cdg = cpath ? castleDenialGain(p, pt, from, to, me, cpath) : 0;
+                if (gg > 0 || cdg > 0) aggr = true;
+                if (gc.on) {
+                    sacV = sacrificeVerdict(p, m, gg, gc, sWeak, sPrep);
+                    if (sacV > 0) aggr = true;
+                    if (quiet) defGain = defenseGain(p, pt, from, to, me, gc);
+                    ghostFx = quiet && gg > 0 && gc.mine.tempo <= 3 && gc.mine.score >= 40;
+                }
             }
         }
         if (!makeMove(p, m)) continue;
@@ -1141,13 +1404,21 @@ static int search(Position &p, int depth, int alpha, int beta, int ply, bool all
         bool givesCheck = inCheck(p);
         int newDepth = depth - 1, v;
         if (GUIDE_EXT && sacr && ply < MAXPLY / 2) newDepth++;
+        else if (GUIDE_EXT && pawnSac && ply < MAXPLY / 2 && depth <= 8) { newDepth++; statPawnSac++; }
+        else if (GUIDE_EXT && sacV > 0 && ply < MAXPLY / 2 && depth <= 8) newDepth++;        // sacrifice mendrika
+        else if (GUIDE_EXT && ghostFx && ply < MAXPLY / 2 && depth <= 6) newDepth++;          // forcing (ghost tempo <= 3)
         if (legal == 1) v = -search(p, newDepth, -beta, -alpha, ply + 1, true);
         else {
             int red = 0;
             if (depth >= 3 && (legal >= 4 || (retreat && legal >= 2)) && quiet && !chk && !givesCheck && !(GUIDE_LMR && aggr)) {
                 red = 1 + (legal >= 8 && depth >= 5) + (legal >= 14 && depth >= 7) + (retreat ? 1 : 0);
-                if (red > newDepth - 1) red = max(0, newDepth - 1);
             }
+            if (gc.on && quiet && !chk && !givesCheck && depth >= 3) {
+                if (red > 0 && defGain > 0 && gc.care >= 0.6) red = 0;                                   // CARE : tsy ahena ny fiarovana
+                else if (!aggr && defGain > 0 && gc.care <= 0.0 && legal >= 6 && depth >= 4) red++;      // LET IT GO
+                if (sacV < 0 && legal >= 3) red++;                                                       // sacrifice tsy mendrika
+            }
+            if (red > newDepth - 1) red = max(0, newDepth - 1);
             v = -search(p, newDepth - red, -alpha - 1, -alpha, ply + 1, true);
             if (v > alpha && red) v = -search(p, newDepth, -alpha - 1, -alpha, ply + 1, true);
             if (v > alpha && v < beta) v = -search(p, newDepth, -beta, -alpha, ply + 1, true);
@@ -1247,8 +1518,35 @@ static bool guardBlocks(const Position &p, Move m) {
     return false;
 }
 
+// REPERTOIRE ONLY : tsy ekena ny move ivelan'ny repertoire JORO mandritra ny dingana voalohany (root ban).
+//  White : 1.e4 ; 1.e4 e5 -> 2.f4 (King's Gambit) na 2.Nf3 ; 1.e4 e5 2.Nf3 Nc6 -> 3.Bc4 (Italian) na 3.d4 (Scotch)
+//  Black : vs 1.e4 -> ...c5 (Sicilian) na ...e6 (French, ary ...d5) ; vs hafa -> ...Nf6 / ...g6 (King's Indian)
+static bool REP_ONLY = true;
+static bool repBans(const Position &p, Move m) {
+    if (!REP_ONLY || p.hply > 6) return false;
+    string ms = moveStr(m);
+    auto h = [&](int i) { return moveStr(p.hist[i].move); };
+    if (p.stm == WHITE) {
+        if (p.hply == 0)
+            return p.fullmove == 1 && p.bb[mk(WHITE, PAWN)] == RANK_BB[1] && undeveloped(p, WHITE) == 4 && ms != "e2e4";
+        if (p.hply == 2 && h(0) == "e2e4" && h(1) == "e7e5") return ms != "f2f4" && ms != "g1f3";
+        if (p.hply == 4 && h(0) == "e2e4" && h(1) == "e7e5" && h(2) == "g1f3" && h(3) == "b8c6") return ms != "f1c4" && ms != "d2d4";
+        return false;
+    }
+    if (undeveloped(p, BLACK) != 4) return false;
+    if (p.hply == 1) {
+        if (h(0) == "e2e4") return ms != "c7c5" && ms != "e7e6";
+        return ms != "g8f6" && ms != "g7g6";
+    }
+    if (p.hply == 3) {
+        if (h(0) == "e2e4" && h(1) == "e7e6") return ms != "d7d5";
+        if (h(0) != "e2e4") return ms != "g7g6" && ms != "f8g7" && ms != "g8f6";
+    }
+    return false;
+}
+
 static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *outDepth = nullptr) {
-    nodes = 0; nodeLimit = lim.nodes; stopSearch = false; timeLimitMs = lim.movetime;
+    nodes = 0; nodeLimit = lim.nodes; stopSearch = false; timeLimitMs = lim.movetime; statPawnSac = 0;
     ROOT_US = p.stm;
     tStart = chrono::steady_clock::now();
     memset(killers, 0, sizeof killers);
@@ -1259,16 +1557,11 @@ static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *
     for (int i = 0; i < root.n; i++) if (makeMove(p, root.m[i])) { unmakeMove(p); if (!firstLegal) firstLegal = root.m[i]; nLegal++; }
     if (!nLegal) return 0;
     rootBan.clear();
-    // Voalohany ho an'ny fotsy : e4 na d4 ihany (tsy g4, h4, a3...)
-    bool firstMove = OPEN_GUARD && p.stm == WHITE && p.hply == 0 && p.fullmove == 1 && p.bb[mk(WHITE, PAWN)] == RANK_BB[1] && undeveloped(p, WHITE) == 4;
+    // REPERTOIRE ONLY : fotsy 1.e4 ; mainty Sicilian/French/KID (jereo repBans)
     if (OPEN_GUARD && p.hply <= 40 && isOpeningPos(p, npmOf(p, WHITE), npmOf(p, BLACK))) {
         for (int i = 0; i < root.n; i++) {
             Move m = root.m[i];
-            if (firstMove) {
-                int f = mFrom(m), t = mTo(m);
-                if (!((f == 12 && t == 28) || (f == 11 && t == 27))) rootBan.push_back(m);
-                continue;
-            }
+            if (repBans(p, m)) { rootBan.push_back(m); continue; }
             if (!guardBlocks(p, m) || !makeMove(p, m)) continue;
             bool gc = inCheck(p);
             unmakeMove(p);
@@ -1304,6 +1597,7 @@ static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *
         if (abs(score) > MATE - 200 && (!CLEAN_ON || depth >= MATE - abs(score))) break;   // Clean: hamarino ny mate fohy indrindra
         if (lim.movetime > 0 && elapsedMs() > lim.movetime * 0.6) break;   // tsy ho ampy ho an'ny depth manaraka
     }
+    if (!quietOut && statPawnSac) { printf("info string pawn-sacrifice extensions %lld\n", statPawnSac); fflush(stdout); }
     if (outScore) *outScore = bestScore;
     if (outDepth) *outDepth = doneDepth;
     return best;
@@ -1332,9 +1626,13 @@ static void setPosition(const string &line) {
 }
 
 // =====================================================================================
-// REPERTOIRE (opening book JORO) - tsipika attaque : King's Gambit / Italian / Scotch (White)
-// Sicilian / King's Indian / French (Black). Ny andalana dia UCI ; ny key (transposition) no ampiasaina.
+// REPERTOIRE (opening book JORO) - ireto ihany no opening ampiasain'i JORO (tsy misy hafa) :
+//   WHITE : King's Gambit (attaque mivantana), Italian Game (préparation sy attaque), Scotch Game (fanokafana centre)
+//   BLACK : Sicilian Defense (counterattack), King's Indian Defense (King-side attack), French Defense (contre-jeu stratégique)
+// Ny andalana dia UCI ; ny key (transposition) no ampiasaina.
 // Ny White-lines dia mitahiry ny move White ihany ; ny Black-lines ny move Black ihany.
+// Ny RepertoireOnly (repBans) no mitandrina ny voalohany : White 1.e4 ; Black = Sicilian/French vs 1.e4, KID vs hafa.
+// Ivelan'ny book dia ny search + ny OPENING SCHOOL no mitarika (plans sy tactical patterns).
 // =====================================================================================
 static bool BOOK_ON = true;
 static bool BOOK_RANDOM = true;
@@ -1345,47 +1643,35 @@ static Position bpos;                // position fiasana ho an'ny fananganana bo
 
 struct RepLine { int color; const char *name; const char *moves; };
 static const RepLine REPERTOIRE[] = {
-    // ---------------- WHITE ----------------
+    // ---------------- WHITE : King's Gambit ----------------
     {WHITE, "King's Gambit: 3...g5 Bc4", "e2e4 e7e5 f2f4 e5f4 g1f3 g7g5 f1c4 g5g4 e1g1 g4f3 d1f3"},
     {WHITE, "King's Gambit: 3...d6 Bc4", "e2e4 e7e5 f2f4 e5f4 g1f3 d7d6 f1c4 g8f6 b1c3"},
     {WHITE, "King's Gambit: 3...Nf6", "e2e4 e7e5 f2f4 e5f4 g1f3 g8f6 e4e5 f6h5 f1e2"},
     {WHITE, "King's Gambit: 3...Be7", "e2e4 e7e5 f2f4 e5f4 g1f3 f8e7 f1c4 g8f6 e4e5"},
     {WHITE, "King's Gambit declined: 2...Bc5", "e2e4 e7e5 f2f4 f8c5 g1f3 d7d6 b1c3 g8f6 f1c4"},
+    // ---------------- WHITE : Italian Game ----------------
     {WHITE, "Italian: Giuoco Piano", "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d4 e5d4 c3d4 c5b4 c1d2 b4d2 b1d2 d7d5 e4d5 f6d5 e1g1"},
     {WHITE, "Italian: 4...d6", "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 c2c3 g8f6 d2d4 e5d4 c3d4 c5b4 b1c3 f6e4 e1g1"},
     {WHITE, "Italian: Two Knights Ng5", "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 c6a5 c4b5 c7c6 d5c6 b7c6 b5e2"},
+    {WHITE, "Italian: Evans Gambit", "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 b2b4 c5b4 c2c3 b4a5 d2d4 e5d4 e1g1"},
+    // ---------------- WHITE : Scotch Game ----------------
     {WHITE, "Scotch: 4...Nf6", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 g8f6 d4c6 b7c6 e4e5 d8e7 d1e2 f6d5 c2c4"},
     {WHITE, "Scotch: 4...Bc5", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 f8c5 c1e3 d8f6 c2c3 g8e7 f1c4"},
-    {WHITE, "Queen's Gambit Declined", "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 f8e7 e2e3 e8g8 g1f3"},
-    {WHITE, "Slav", "d2d4 d7d5 c2c4 c7c6 g1f3 g8f6 b1c3 d5c4 a2a4 c8f5 e2e3"},
-    {WHITE, "Nimzo-Indian", "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4 e2e3 e8g8 f1d3 d7d5 g1f3"},
-    {WHITE, "vs King's Indian", "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8 f1e2"},
-    {WHITE, "Open Sicilian (...a6, any move order)", "e2e4 c7c5 g1f3 a7a6 d2d4 c5d4 f3d4 g8f6 b1c3 e7e5 d4b3 f8e7 f2f3"},
-    {WHITE, "Open Sicilian ...d6", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1e3 e7e5 d4b3 c8e6 f2f3"},
-    {WHITE, "Open Sicilian ...Nc6", "e2e4 c7c5 g1f3 b8c6 d2d4 c5d4 f3d4 g8f6 b1c3 d7d6 c1g5 e7e6 d1d2"},
-    {WHITE, "Open Sicilian ...e6", "e2e4 c7c5 g1f3 e7e6 d2d4 c5d4 f3d4 a7a6 f1d3 g8f6 e1g1"},
-    {WHITE, "Open Sicilian ...g6", "e2e4 c7c5 g1f3 g7g6 d2d4 c5d4 f3d4 f8g7 b1c3 b8c6 c1e3 g8f6 f1c4 e8g8 c4b3"},
-    {WHITE, "vs 1...a6 St George", "e2e4 a7a6 d2d4 b7b5 f1d3 c8b7 g1f3 e7e6 e1g1"},
-    {WHITE, "vs 1...a6 ...e6", "e2e4 a7a6 d2d4 e7e6 g1f3 d7d5 e4e5 c7c5 c2c3 b8c6 f1d3"},
-    {WHITE, "Pirc Austrian Attack", "e2e4 d7d6 d2d4 g8f6 b1c3 g7g6 f2f4 f8g7 g1f3 e8g8 f1d3"},
-    {WHITE, "Modern Austrian Attack", "e2e4 g7g6 d2d4 f8g7 b1c3 d7d6 f2f4 g8f6 g1f3 e8g8 f1d3"},
-    {WHITE, "French Classical", "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 c1g5 f8e7 e4e5 f6d7 g5e7 d8e7 f2f4 e8g8 g1f3"},
-    {WHITE, "French Winawer", "e2e4 e7e6 d2d4 d7d5 b1c3 f8b4 e4e5 c7c5 a2a3 b4c3 b2c3 g8e7 d1g4"},
-    {WHITE, "Caro-Kann Advance", "e2e4 c7c6 d2d4 d7d5 e4e5 c8f5 g1f3 e7e6 f1e2 c6c5 c1e3"},
-    {WHITE, "Caro-Kann Classical", "e2e4 c7c6 d2d4 d7d5 b1c3 d5e4 c3e4 c8f5 e4g3 f5g6 h2h4 h7h6 g1f3 b8d7 h4h5 g6h7 f1d3 h7d3 d1d3"},
-    {WHITE, "Scandinavian", "e2e4 d7d5 e4d5 d8d5 b1c3 d5a5 d2d4 g8f6 g1f3 c7c6 f1c4 c8f5 c1d2"},
-    {WHITE, "Alekhine", "e2e4 g8f6 e4e5 f6d5 d2d4 d7d6 g1f3 c8g4 f1e2 e7e6 e1g1"},
-    // ---------------- BLACK ----------------
+    {WHITE, "Scotch: 4...Qh4", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f3d4 d8h4 b1c3 f8b4 f1e2 g8f6 d4c6 b7c6 e1g1"},
+    {WHITE, "Scotch Gambit", "e2e4 e7e5 g1f3 b8c6 d2d4 e5d4 f1c4 f8c5 e1g1 d7d6 c2c3"},
+    // ---------------- BLACK : Sicilian Defense ----------------
     {BLACK, "Sicilian vs 1.e4 (Najdorf)", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1e3 e7e5 d4b3 c8e6"},
     {BLACK, "Sicilian: 6.Bg5", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 c1g5 e7e6 f2f4 f8e7"},
     {BLACK, "Sicilian: 6.Be2", "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6 b1c3 a7a6 f1e2 e7e5 d4b3 c8e6"},
     {BLACK, "Sicilian: 2.Nc3", "e2e4 c7c5 b1c3 b8c6 g2g3 g7g6 f1g2 f8g7 d2d3 d7d6"},
     {BLACK, "Sicilian: 2.c3", "e2e4 c7c5 c2c3 g8f6 e4e5 f6d5 d2d4 c5d4 g1f3 b8c6 c3d4 d7d6"},
+    // ---------------- BLACK : King's Indian Defense ----------------
     {BLACK, "KID: Classical", "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 g1f3 e8g8 f1e2 e7e5 e1g1 b8c6 d4d5 c6e7"},
     {BLACK, "KID: Fianchetto", "d2d4 g8f6 c2c4 g7g6 g2g3 f8g7 f1g2 e8g8 b1c3 d7d6 g1f3 b8d7 e1g1 e7e5"},
     {BLACK, "KID: vs Nf3", "d2d4 g8f6 g1f3 g7g6 c2c4 f8g7 b1c3 e8g8 e2e4 d7d6 f1e2 e7e5 e1g1 b8c6"},
     {BLACK, "KID vs 1.c4", "c2c4 g8f6 b1c3 g7g6 e2e4 d7d6 d2d4 f8g7 g1f3 e8g8"},
     {BLACK, "KID vs 1.Nf3", "g1f3 g8f6 c2c4 g7g6 b1c3 f8g7 e2e4 d7d6 d2d4 e8g8"},
+    // ---------------- BLACK : French Defense ----------------
     {BLACK, "French: Classical 4.e5", "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6 e4e5 f6d7 f2f4 c7c5 g1f3 b8c6 c1e3 a7a6"},
     {BLACK, "French: Tarrasch", "e2e4 e7e6 d2d4 d7d5 b1d2 c7c5 e4d5 e6d5 g1f3 b8c6 f1b5 f8d6 d4c5 d6c5 e1g1 g8e7"},
     {BLACK, "French: Advance", "e2e4 e7e6 d2d4 d7d5 e4e5 c7c5 c2c3 b8c6 g1f3 d8b6 a2a3 c5c4"},
@@ -1497,11 +1783,11 @@ static void goCommand(const string &line) {
     fflush(stdout);
 }
 
-// ---- SELF-PLAY A/B : A = Race+Clean+Opening2 ON ; B = OFF ; ny safidy hafa (Ghost, Opening, Guide...) dia mitovy ho an'ny roa
+// ---- SELF-PLAY A/B : A = Race+Clean+Opening2 ON ; B = OFF ; ny safidy hafa (Ghost-search, Opening, Guide...) dia mitovy ho an'ny roa
 static Position spos;
-static void setAdv(bool on) { RACE_ON = on; CLEAN_ON = on; OPEN2_ON = on; OPEN_GUARD = on; STORM_ON = on; }
+static void setAdv(bool on) { RACE_ON = on; CLEAN_ON = on; OPEN2_ON = on; OPEN_GUARD = on; STORM_ON = on; SCHOOL_ON = on; }
 static void selfplay(int games, int depth) {
-    bool sR = RACE_ON, sC = CLEAN_ON, sO = OPEN2_ON, sG = OPEN_GUARD, sS = STORM_ON, sQ = quietOut;
+    bool sR = RACE_ON, sC = CLEAN_ON, sO = OPEN2_ON, sG = OPEN_GUARD, sS = STORM_ON, sQ = quietOut, sSc = SCHOOL_ON;
     U64 sRng = rng_state;
     size_t sTT = ttMB;
     ttResize(16);
@@ -1536,7 +1822,7 @@ static void selfplay(int games, int depth) {
     double pct = games ? 100.0 * (win + 0.5 * draw) / games : 0;
     printf("selfplay depth %d: A(Race+Clean+Opening2+Guard) +%d =%d -%d  score %.1f%%\n", depth, win, draw, loss, pct);
     fflush(stdout);
-    RACE_ON = sR; CLEAN_ON = sC; OPEN2_ON = sO; OPEN_GUARD = sG; STORM_ON = sS; quietOut = sQ; rng_state = sRng;
+    RACE_ON = sR; CLEAN_ON = sC; OPEN2_ON = sO; OPEN_GUARD = sG; STORM_ON = sS; SCHOOL_ON = sSc; quietOut = sQ; rng_state = sRng;
     ttResize(sTT);
 }
 
@@ -1564,7 +1850,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 1.0\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostW type spin default 25 min 0 max 400\noption name GhostCap type spin default 80 min 0 max 400\noption name GhostAlert type spin default 10 min 0 max 200\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 1.2\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostAlert type spin default 10 min 0 max 200\noption name GhostOrder type spin default 6000 min 0 max 20000\noption name School type check default true\noption name SchoolCap type spin default 90 min 0 max 300\noption name RepertoireOnly type check default true\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
@@ -1577,8 +1863,10 @@ int main(int argc, char **argv) {
             else if (name == "Opening") OPENING_ON = (val == "true" || val == "1");
             else if (name == "OpenCap") OPEN_CAP = max(0, atoi(val.c_str()));
             else if (name == "Ghost") GHOST_ON = (val == "true" || val == "1");
-            else if (name == "GhostW") GHOST_W = max(0, atoi(val.c_str()));
-            else if (name == "GhostCap") GHOST_CAP = max(0, atoi(val.c_str()));
+            else if (name == "GhostOrder") GHOST_ORDER = max(0, atoi(val.c_str()));
+            else if (name == "School") SCHOOL_ON = (val == "true" || val == "1");
+            else if (name == "SchoolCap") SCHOOL_CAP = max(0, atoi(val.c_str()));
+            else if (name == "RepertoireOnly") REP_ONLY = (val == "true" || val == "1");
             else if (name == "GhostAlert") GHOST_ALERT = max(0, atoi(val.c_str()));
             else if (name == "GuideLMR") GUIDE_LMR = (val == "true" || val == "1");
             else if (name == "GuideExt") GUIDE_EXT = (val == "true" || val == "1");
@@ -1623,6 +1911,20 @@ int main(int argc, char **argv) {
                 printf("%s: castle %s, shield short %d long %d, passiveDev %d, castleStruct %d | commit %d vsOpp %d storm %d\n", nm[c], cn[predictCastle(gpos, c)],
                        shieldQuality(gpos, c, 0), shieldQuality(gpos, c, 1), passiveDev(gpos, c), castleStructSide(gpos, c),
                        castleCommit(gpos, c), castleVsOpp(gpos, c), stormSide(gpos, c));
+            fflush(stdout);
+        } else if (cmd == "school") {
+            const char *nm[2] = {"White", "Black"};
+            for (int c = 0; c < 2; c++) {
+                int w = kingWeakness(gpos, c), pr = attackPrep(gpos, c);
+                printf("%s: kingWeakness(enemy) %d, attackPrep %d, pawnIntel %d, sacComp %d, transition %d | total %d\n", nm[c], w, pr,
+                       pawnIntel(gpos, c), sacComp(gpos, c, w, pr), transition(gpos, c), schoolSide(gpos, c));
+            }
+            printf("schoolTerms(white pov) %d\n", schoolTerms(gpos));
+            fflush(stdout);
+        } else if (cmd == "ghost") {
+            GhostCtx g = ghostContext(gpos);
+            printf("ghost %s | mine: score %d tempo %d cost %d | theirs: score %d tempo %d cost %d | care %.2f\n", g.on ? "ON" : "off",
+                   g.mine.score, g.mine.tempo, g.mine.cost, g.theirs.score, g.theirs.tempo, g.theirs.cost, g.care);
             fflush(stdout);
         } else if (cmd == "selfplay") {
             int g = 10, d = 5; is >> g >> d;
