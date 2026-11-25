@@ -1,8 +1,7 @@
 # JORO CI : build + tests  ->  selfplay A/B (matrix module)  ->  vs Stockfish (matrix Elo x suite)  ->  calibration/report
-# Fitaovana : python-chess (tools/match.py), Stockfish avy amin'ny apt. Rakitra ilaina ao amin'ny repo :
-#   joro_epd_cpp.tgz (joro/joro.cpp + joro/fens/*.epd + joro/tools/*.py : extraction auto)  NA  rakitra tsirairay ao amin'ny repo
-# Raha misy rakitra joro*.tgz eo amin'ny fototry ny repo (na input 'package'), ny job build no manala azy ho azy
-# (joro/joro.cpp + joro/fens/joro_positions.epd) ary mamerina azy ireo ho an'ny job rehetra amin'ny artifact.
+# Fitaovana : python-chess (tools/match.py), Stockfish avy amin'ny apt.
+# REPO : ny .tgz (joro_epd_cpp.tgz) + ity joro.yml ihany. Ny job build dia mitady ho azy ny *.tgz eo amin'ny fototry ny repo
+# ary manala azy (joro.cpp + fens/*.epd + tools/*.py). Tsy misy input na rakitra hafa ilaina.
 name: JORO CI
 
 on:
@@ -14,9 +13,6 @@ on:
       games_sf:
         description: "Isan'ny lalao isaky ny (SF Elo x suite)"
         default: "40"
-      package:
-        description: "Rakitra .tgz (joro.cpp + fens/*.epd) ho alamina ho azy ; foana = joro*.tgz ao amin'ny repo raha misy"
-        default: ""
       movetime_ms:
         description: "Fotoana isaky ny move (ms)"
         default: "200"
@@ -25,9 +21,9 @@ on:
         default: '[2000,2300,2600,2900,3190,"max"]'
   push:
     branches: [main]
-    paths: ["joro.cpp", "joro*.tgz", "tools/**", "fens/**", ".github/workflows/joro.yml"]
+    paths: ["*.tgz", ".github/workflows/joro.yml"]
   pull_request:
-    paths: ["joro.cpp", "joro*.tgz", "tools/**", "fens/**", ".github/workflows/joro.yml"]
+    paths: ["*.tgz", ".github/workflows/joro.yml"]
 
 concurrency:
   group: joro-${{ github.ref }}
@@ -38,7 +34,6 @@ env:
   GAMES_SELFPLAY: ${{ inputs.games_selfplay || '8' }}
   GAMES_SF: ${{ inputs.games_sf || '8' }}
   MOVETIME: ${{ inputs.movetime_ms || '100' }}
-  PACKAGE: ${{ inputs.package || '' }}
 
 jobs:
   # ------------------------------------------------------------------ 1. BUILD + TESTS
@@ -48,26 +43,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Extraction ny .tgz (joro.cpp + fens) raha misy
+      - name: Extraction ho azy ny .tgz (joro.cpp + fens + tools)
         run: |
           set -e
-          TGZ="$PACKAGE"
-          [ -z "$TGZ" ] && TGZ=$(ls joro*.tgz 2>/dev/null | head -n1 || true)
-          if [ -n "$TGZ" ]; then
-            echo "Extraction : $TGZ"
-            tar -tzf "$TGZ"
-            rm -rf /tmp/pk && mkdir -p /tmp/pk
-            tar -xzf "$TGZ" -C /tmp/pk
-            SRC=$(find /tmp/pk -name joro.cpp | head -n1)
-            [ -n "$SRC" ] || { echo "::error::tsy misy joro.cpp ao anaty $TGZ"; exit 1; }
-            cp -r "$(dirname "$SRC")"/. .
-          else
-            echo "Tsy misy .tgz : ampiasaina ny joro.cpp sy fens/ ao amin'ny repo"
-          fi
-          test -f joro.cpp || { echo "::error::tsy hita ny joro.cpp"; exit 1; }
-          test -f fens/joro_positions.epd || { echo "::error::tsy hita ny fens/joro_positions.epd"; exit 1; }
+          TGZ=$(ls ./*.tgz 2>/dev/null | head -n1 || true)
+          [ -n "$TGZ" ] || { echo "::error::tsy misy rakitra .tgz eo amin'ny fototry ny repo"; exit 1; }
+          echo "Extraction : $TGZ"
+          tar -tzf "$TGZ"
+          rm -rf /tmp/pk && mkdir -p /tmp/pk
+          tar -xzf "$TGZ" -C /tmp/pk
+          SRC=$(find /tmp/pk -name joro.cpp | head -n1)
+          [ -n "$SRC" ] || { echo "::error::tsy misy joro.cpp ao anaty $TGZ"; exit 1; }
+          cp -r "$(dirname "$SRC")"/. .
+          test -f fens/joro_positions.epd || { echo "::error::tsy hita ny fens/joro_positions.epd ao anaty $TGZ"; exit 1; }
           for f in match.py calibrate.py joro_stats.py gen_fens.py; do
-            test -f tools/$f || { echo "::error::tsy hita ny tools/$f (apetraho ao anaty .tgz ao amin'ny joro/tools/ na ao amin'ny repo)"; exit 1; }
+            test -f tools/$f || { echo "::error::tsy hita ny tools/$f ao anaty $TGZ"; exit 1; }
           done
 
       - name: Compile
