@@ -1,53 +1,201 @@
-name: JORO
+# JORO CI : build + tests  ->  selfplay A/B (matrix module)  ->  vs Stockfish (matrix Elo x suite)  ->  calibration/report
+# Fitaovana : python-chess (tools/match.py), Stockfish avy amin'ny apt. Rakitra ilaina ao amin'ny repo :
+#   joro.cpp , fens/joro_positions.epd , tools/{match.py,calibrate.py,joro_stats.py,gen_fens.py}
+name: JORO CI
+
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "analyze, selfplay, match"
-        default: "match"
-      fen:
-        description: "FEN (na startpos)"
-        default: "startpos"
-      extra:
-        description: "oh: --cpp ./joro_cpp --games 30 --sf-elo 1900 --time 1 --openplies 1"
-        default: ""
+      games_selfplay:
+        description: "Isan'ny lalao selfplay isaky ny module (ho an'ny FEN : 2 lalao isaky ny position)"
+        default: "40"
+      games_sf:
+        description: "Isan'ny lalao isaky ny (SF Elo x suite)"
+        default: "40"
+      movetime_ms:
+        description: "Fotoana isaky ny move (ms)"
+        default: "200"
+      sf_elos:
+        description: "Lisitry ny Stockfish (JSON : UCI_Elo 2000..3190, ary \"max\" = tsy voafetra)"
+        default: '[2000,2300,2600,2900,3190,"max"]'
+  push:
+    branches: [main]
+    paths: ["joro.cpp", "tools/**", "fens/**", ".github/workflows/joro.yml"]
+  pull_request:
+    paths: ["joro.cpp", "tools/**", "fens/**", ".github/workflows/joro.yml"]
+
+concurrency:
+  group: joro-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # push / PR = smoke test haingana ; workflow_dispatch = lanja kokoa
+  GAMES_SELFPLAY: ${{ inputs.games_selfplay || '8' }}
+  GAMES_SF: ${{ inputs.games_sf || '8' }}
+  MOVETIME: ${{ inputs.movetime_ms || '100' }}
+
 jobs:
-  run:
+  # ------------------------------------------------------------------ 1. BUILD + TESTS
+  build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        seed: [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
+      - name: Compile
+        run: g++ -O3 -std=c++17 -Wall -o joro_cpp joro.cpp
+
+      - name: Perft (move generator)
+        run: |
+          out=$(printf 'perft 5\nquit\n' | ./joro_cpp)
+          echo "$out"
+          echo "$out" | grep -q 'perft 5 = 4865609'
+
+      - name: Repertoire smoke test (book + RepertoireOnly)
+        run: |
+          # fotsy : 1.e4 foana
+          for i in 1 2 3 4 5; do
+            printf 'position startpos\ngo depth 4\nquit\n' | ./joro_cpp | grep -q 'bestmove e2e4'
+          done
+          # mainty vs 1.e4 : Sicilian (c5) na French (e6)
+          printf 'position startpos moves e2e4\ngo depth 4\nquit\n' | ./joro_cpp | grep -Eq 'bestmove (c7c5|e7e6)'
+          # mainty vs 1.d4 / 1.c4 / 1.Nf3 / 1.b3 : King's Indian (Nf6 na g6)
+          for m in d2d4 c2c4 g1f3 b2b3; do
+            printf "position startpos moves $m\ngo depth 4\nquit\n" | ./joro_cpp | grep -Eq 'bestmove (g8f6|g7g6)'
+          done
+          # French : ...d5 aorian'ny 1.e4 e6 2.d4 (na 2.Nc3 ivelan'ny book)
+          printf 'position startpos moves e2e4 e7e6 b1c3\ngo depth 4\nquit\n' | ./joro_cpp | grep -q 'bestmove d7d5'
+
+      - name: Ghost ao amin'ny search (tsy misy eval intsony)
+        run: |
+          ! grep -n 'ghostTerm\|GHOST_W\|GHOST_CAP' joro.cpp
+          printf 'position fen r1bq1b1r/ppp2kpp/2n5/3np3/2B5/2N5/PPPP1PPP/R1BQK1NR w KQ - 0 7\nghost\nquit\n' | ./joro_cpp | grep -q '^ghost'
+
+      - name: Bench
+        run: printf 'bench 8\nquit\n' | ./joro_cpp | tail -1
+
+      - name: FEN (fens/joro_positions.epd) ara-dalàna sy mifanaraka amin'ny generator
+        run: |
+          python3 tools/gen_fens.py ./joro_cpp
+          git diff --exit-code fens/joro_positions.epd
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: joro-bin
+          path: joro_cpp
+          retention-days: 7
+
+  # ------------------------------------------------------------------ 2. SELFPLAY A/B  (matrix : module)
+  selfplay:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [all, school, ghost, race, clean, opening2, storm]
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install chess numpy
-
-      - uses: actions/cache@v4
-        id: kbnk
+      - run: pip install chess
+      - uses: actions/download-artifact@v4
         with:
-          path: kbnk.dat
-          key: kbnk-v1
-      - if: steps.kbnk.outputs.cache-hit != 'true'
-        run: python joro.py buildkbn
+          name: joro-bin
+      - run: chmod +x joro_cpp
 
-      - name: Compile C++ engine
-        run: g++ -O3 -std=c++17 -o joro_cpp joro.cpp
+      - name: Selfplay  A (default)  vs  B (${{ matrix.feature }} atsahatra)
+        run: |
+          case "${{ matrix.feature }}" in
+            all)      B="School=false Ghost=false Race=false Clean=false Opening2=false Storm=false" ;;
+            school)   B="School=false" ;;
+            ghost)    B="Ghost=false" ;;
+            race)     B="Race=false" ;;
+            clean)    B="Clean=false" ;;
+            opening2) B="Opening2=false" ;;
+            storm)    B="Storm=false" ;;
+          esac
+          args=()
+          for o in $B; do args+=(--opt-b "$o"); done
+          CONC=$(( $(nproc) / 2 )); [ "$CONC" -lt 1 ] && CONC=1
+          python3 tools/match.py selfplay --engine ./joro_cpp \
+            --fens fens/joro_positions.epd --tag all \
+            --games "$GAMES_SELFPLAY" --movetime "$MOVETIME" --concurrency "$CONC" \
+            --label "selfplay-${{ matrix.feature }}" --out-dir results "${args[@]}"
 
-      - run: sudo apt-get update && sudo apt-get install -y stockfish
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-selfplay-${{ matrix.feature }}
+          path: results/
 
+  # ------------------------------------------------------------------ 3. JORO vs STOCKFISH  (matrix : UCI_Elo x suite)
+  vs-stockfish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        elo: ${{ fromJSON(inputs.sf_elos || '[2000,2300,2600,2900,3190,"max"]') }}
+        suite: [fen, startpos]     # fen = opening + style FEN ; startpos = book + repertoire
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "pypy3.10"
+          python-version: "3.12"
       - run: pip install chess
+      - name: Stockfish
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq stockfish
+          echo uci | /usr/games/stockfish | head -3
+      - uses: actions/download-artifact@v4
+        with:
+          name: joro-bin
+      - run: chmod +x joro_cpp
 
-      - name: Run JORO
-        run: python joro.py $MODE "$FEN" $EXTRA --seed $SEED
-        env:
-          MODE: ${{ inputs.mode }}
-          FEN: ${{ inputs.fen }}
-          EXTRA: ${{ inputs.extra }}
-          SEED: ${{ matrix.seed }}
+      - name: JORO vs Stockfish ${{ matrix.elo }} (${{ matrix.suite }})
+        run: |
+          CONC=$(( $(nproc) / 2 )); [ "$CONC" -lt 1 ] && CONC=1
+          python3 tools/match.py stockfish --engine ./joro_cpp --stockfish /usr/games/stockfish \
+            --sf-elo ${{ matrix.elo }} --suite ${{ matrix.suite }} \
+            --fens fens/joro_positions.epd --tag all \
+            --games "$GAMES_SF" --movetime "$MOVETIME" --concurrency "$CONC" \
+            --label "sf${{ matrix.elo }}-${{ matrix.suite }}" --out-dir results
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-sf${{ matrix.elo }}-${{ matrix.suite }}
+          path: results/
+
+  # ------------------------------------------------------------------ 4. CALIBRATION + REPORT
+  report:
+    needs: [build, selfplay, vs-stockfish]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: results
+          merge-multiple: true
+      - name: Calibration (matrix -> Elo) + repertoire + fomba filalaovana
+        run: |
+          set +e
+          python3 tools/calibrate.py results > /dev/null
+          code=$?
+          cat results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          exit $code
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: joro-report
+          path: |
+            results/summary.md
+            results/summary.json
+            results/*.pgn
