@@ -1,6 +1,8 @@
 # JORO CI : build + tests  ->  selfplay A/B (matrix module)  ->  vs Stockfish (matrix Elo x suite)  ->  calibration/report
 # Fitaovana : python-chess (tools/match.py), Stockfish avy amin'ny apt. Rakitra ilaina ao amin'ny repo :
-#   joro.cpp , fens/joro_positions.epd , tools/{match.py,calibrate.py,joro_stats.py,gen_fens.py}
+#   tools/{match.py,calibrate.py,joro_stats.py,gen_fens.py}  +  EITHER joro.cpp & fens/joro_positions.epd  OR  joro_epd_cpp.tgz (extraction auto)
+# Raha misy rakitra joro*.tgz eo amin'ny fototry ny repo (na input 'package'), ny job build no manala azy ho azy
+# (joro/joro.cpp + joro/fens/joro_positions.epd) ary mamerina azy ireo ho an'ny job rehetra amin'ny artifact.
 name: JORO CI
 
 on:
@@ -12,6 +14,9 @@ on:
       games_sf:
         description: "Isan'ny lalao isaky ny (SF Elo x suite)"
         default: "40"
+      package:
+        description: "Rakitra .tgz (joro.cpp + fens/*.epd) ho alamina ho azy ; foana = joro*.tgz ao amin'ny repo raha misy"
+        default: ""
       movetime_ms:
         description: "Fotoana isaky ny move (ms)"
         default: "200"
@@ -20,9 +25,9 @@ on:
         default: '[2000,2300,2600,2900,3190,"max"]'
   push:
     branches: [main]
-    paths: ["joro.cpp", "tools/**", "fens/**", ".github/workflows/joro.yml"]
+    paths: ["joro.cpp", "joro*.tgz", "tools/**", "fens/**", ".github/workflows/joro.yml"]
   pull_request:
-    paths: ["joro.cpp", "tools/**", "fens/**", ".github/workflows/joro.yml"]
+    paths: ["joro.cpp", "joro*.tgz", "tools/**", "fens/**", ".github/workflows/joro.yml"]
 
 concurrency:
   group: joro-${{ github.ref }}
@@ -33,6 +38,7 @@ env:
   GAMES_SELFPLAY: ${{ inputs.games_selfplay || '8' }}
   GAMES_SF: ${{ inputs.games_sf || '8' }}
   MOVETIME: ${{ inputs.movetime_ms || '100' }}
+  PACKAGE: ${{ inputs.package || '' }}
 
 jobs:
   # ------------------------------------------------------------------ 1. BUILD + TESTS
@@ -41,6 +47,25 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extraction ny .tgz (joro.cpp + fens) raha misy
+        run: |
+          set -e
+          TGZ="$PACKAGE"
+          [ -z "$TGZ" ] && TGZ=$(ls joro*.tgz 2>/dev/null | head -n1 || true)
+          if [ -n "$TGZ" ]; then
+            echo "Extraction : $TGZ"
+            tar -tzf "$TGZ"
+            rm -rf /tmp/pk && mkdir -p /tmp/pk
+            tar -xzf "$TGZ" -C /tmp/pk
+            SRC=$(find /tmp/pk -name joro.cpp | head -n1)
+            [ -n "$SRC" ] || { echo "::error::tsy misy joro.cpp ao anaty $TGZ"; exit 1; }
+            cp -r "$(dirname "$SRC")"/. .
+          else
+            echo "Tsy misy .tgz : ampiasaina ny joro.cpp sy fens/ ao amin'ny repo"
+          fi
+          test -f joro.cpp || { echo "::error::tsy hita ny joro.cpp"; exit 1; }
+          test -f fens/joro_positions.epd || { echo "::error::tsy hita ny fens/joro_positions.epd"; exit 1; }
 
       - name: Compile
         run: g++ -O3 -std=c++17 -Wall -o joro_cpp joro.cpp
@@ -76,13 +101,16 @@ jobs:
 
       - name: FEN (fens/joro_positions.epd) ara-dalàna sy mifanaraka amin'ny generator
         run: |
+          cp fens/joro_positions.epd /tmp/joro_positions.orig
           python3 tools/gen_fens.py ./joro_cpp
-          git diff --exit-code fens/joro_positions.epd
+          diff /tmp/joro_positions.orig fens/joro_positions.epd
 
       - uses: actions/upload-artifact@v4
         with:
           name: joro-bin
-          path: joro_cpp
+          path: |
+            joro_cpp
+            fens/joro_positions.epd
           retention-days: 7
 
   # ------------------------------------------------------------------ 2. SELFPLAY A/B  (matrix : module)
