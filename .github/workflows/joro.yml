@@ -1,6 +1,6 @@
 # JORO CI : build + tests  ->  selfplay A/B (matrix module)  ->  vs Stockfish (matrix Elo x suite)  ->  calibration/report
 # Fitaovana : python-chess (tools/match.py), Stockfish avy amin'ny apt. Rakitra ilaina ao amin'ny repo :
-#   tools/{match.py,calibrate.py,joro_stats.py,gen_fens.py}  +  EITHER joro.cpp & fens/joro_positions.epd  OR  joro_epd_cpp.tgz (extraction auto)
+#   joro_epd_cpp.tgz (joro/joro.cpp + joro/fens/*.epd + joro/tools/*.py : extraction auto)  NA  rakitra tsirairay ao amin'ny repo
 # Raha misy rakitra joro*.tgz eo amin'ny fototry ny repo (na input 'package'), ny job build no manala azy ho azy
 # (joro/joro.cpp + joro/fens/joro_positions.epd) ary mamerina azy ireo ho an'ny job rehetra amin'ny artifact.
 name: JORO CI
@@ -66,6 +66,9 @@ jobs:
           fi
           test -f joro.cpp || { echo "::error::tsy hita ny joro.cpp"; exit 1; }
           test -f fens/joro_positions.epd || { echo "::error::tsy hita ny fens/joro_positions.epd"; exit 1; }
+          for f in match.py calibrate.py joro_stats.py gen_fens.py; do
+            test -f tools/$f || { echo "::error::tsy hita ny tools/$f (apetraho ao anaty .tgz ao amin'ny joro/tools/ na ao amin'ny repo)"; exit 1; }
+          done
 
       - name: Compile
         run: g++ -O3 -std=c++17 -Wall -o joro_cpp joro.cpp
