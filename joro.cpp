@@ -223,6 +223,33 @@ static bool setFen(Position &p, const string &fen) {
     p.halfmove = hm; p.fullmove = fm;
     return popcnt(p.bb[mk(WHITE, KING)]) == 1 && popcnt(p.bb[mk(BLACK, KING)]) == 1;
 }
+static string fenStr(const Position &p) {
+    string o;
+    static const char *PCH = "PNBRQKpnbrqk";
+    for (int r = 7; r >= 0; r--) {
+        int e = 0;
+        for (int f = 0; f < 8; f++) {
+            int pc = p.sq[r * 8 + f];
+            if (pc == NOPIECE) { e++; continue; }
+            if (e) { o += char('0' + e); e = 0; }
+            o += PCH[pc];
+        }
+        if (e) o += char('0' + e);
+        if (r) o += '/';
+    }
+    o += p.stm == WHITE ? " w " : " b ";
+    string c;
+    if (p.castling & 1) c += 'K';
+    if (p.castling & 2) c += 'Q';
+    if (p.castling & 4) c += 'k';
+    if (p.castling & 8) c += 'q';
+    o += c.empty() ? "-" : c;
+    o += " ";
+    if (p.ep >= 0) { o += char('a' + fileOf(p.ep)); o += char('1' + rankOf(p.ep)); } else o += "-";
+    o += " " + to_string(p.halfmove) + " " + to_string(p.fullmove);
+    return o;
+}
+static int skippedMoves = 0;      // move tsy ara-dalàna tao amin'ny "position ... moves" (fanamarinana FEN)
 static const char *STARTFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 static string sqName(int s) { string r; r += (char)('a' + fileOf(s)); r += (char)('1' + rankOf(s)); return r; }
@@ -1606,6 +1633,7 @@ static Move think(Position &p, const Limits &lim, int *outScore = nullptr, int *
 // ---- UCI
 static Position gpos;
 static void setPosition(const string &line) {
+    skippedMoves = 0;
     istringstream is(line);
     string tok;
     is >> tok;                       // position
@@ -1616,12 +1644,12 @@ static void setPosition(const string &line) {
         while (is >> t && t != "moves") fen += t + " ";
         setFen(gpos, fen);
         if (t == "moves") {
-            while (is >> t) { Move m = findMoveStr(gpos, t); if (m && makeMove(gpos, m)) {} }
+            while (is >> t) { Move m = findMoveStr(gpos, t); if (m && makeMove(gpos, m)) {} else skippedMoves++; }
         }
         return;
     }
     if (is >> tok && tok == "moves") {
-        while (is >> tok) { Move m = findMoveStr(gpos, tok); if (m) makeMove(gpos, m); }
+        while (is >> tok) { Move m = findMoveStr(gpos, tok); if (m) makeMove(gpos, m); else skippedMoves++; }
     }
 }
 
@@ -1850,7 +1878,7 @@ int main(int argc, char **argv) {
         string cmd;
         is >> cmd;
         if (cmd == "uci") {
-            printf("id name JORO-cpp 1.2\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostAlert type spin default 10 min 0 max 200\noption name GhostOrder type spin default 6000 min 0 max 20000\noption name School type check default true\noption name SchoolCap type spin default 90 min 0 max 300\noption name RepertoireOnly type check default true\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
+            printf("id name JORO-cpp 1.2\nid author JORO\noption name Hash type spin default 64 min 1 max 4096\noption name Opening type check default true\noption name OpenCap type spin default 100 min 0 max 400\noption name Ghost type check default true\noption name GhostAlert type spin default 10 min 0 max 200\noption name GhostOrder type spin default 6000 min 0 max 20000\noption name School type check default true\noption name SchoolCap type spin default 90 min 0 max 300\noption name RepertoireOnly type check default true\noption name Seed type spin default 0 min 0 max 2147483647\noption name GuideLMR type check default true\noption name GuideExt type check default true\noption name GuideAlert type spin default 12 min 0 max 200\noption name Race type check default true\noption name RaceW type spin default 5 min 0 max 100\noption name RaceCap type spin default 90 min 0 max 400\noption name RaceAlert type spin default 8 min 0 max 200\noption name RaceMargin type spin default 4 min 1 max 30\noption name Clean type check default true\noption name Opening2 type check default true\noption name Opening2Cap type spin default 60 min 0 max 300\noption name Storm type check default true\noption name StormCap type spin default 80 min 0 max 300\noption name SameSidePen type spin default 35 min 0 max 200\noption name BookCheck type check default true\noption name BookMargin type spin default 120 min 0 max 500\noption name Book type check default true\noption name OpeningGuard type check default true\noption name BookRandom type check default true\noption name BookPlies type spin default 24 min 0 max 80\nuciok\n");
             fflush(stdout);
         } else if (cmd == "isready") { printf("readyok\n"); fflush(stdout); }
         else if (cmd == "ucinewgame") { setFen(gpos, STARTFEN); fill(TT.begin(), TT.end(), TTEntry{0, 0, 0, 0, 0}); }
@@ -1866,6 +1894,7 @@ int main(int argc, char **argv) {
             else if (name == "GhostOrder") GHOST_ORDER = max(0, atoi(val.c_str()));
             else if (name == "School") SCHOOL_ON = (val == "true" || val == "1");
             else if (name == "SchoolCap") SCHOOL_CAP = max(0, atoi(val.c_str()));
+            else if (name == "Seed") { long long sd = atoll(val.c_str()); if (sd > 0) rng_state = 0x9E3779B97F4A7C15ULL ^ ((U64)sd * 0xD1B54A32D192ED03ULL); if (!rng_state) rng_state = 1; }
             else if (name == "RepertoireOnly") REP_ONLY = (val == "true" || val == "1");
             else if (name == "GhostAlert") GHOST_ALERT = max(0, atoi(val.c_str()));
             else if (name == "GuideLMR") GUIDE_LMR = (val == "true" || val == "1");
@@ -1912,6 +1941,8 @@ int main(int argc, char **argv) {
                        shieldQuality(gpos, c, 0), shieldQuality(gpos, c, 1), passiveDev(gpos, c), castleStructSide(gpos, c),
                        castleCommit(gpos, c), castleVsOpp(gpos, c), stormSide(gpos, c));
             fflush(stdout);
+        } else if (cmd == "fen") {
+            printf("fen %s\nskipped %d\n", fenStr(gpos).c_str(), skippedMoves); fflush(stdout);
         } else if (cmd == "school") {
             const char *nm[2] = {"White", "Black"};
             for (int c = 0; c < 2; c++) {
